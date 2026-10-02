@@ -1,33 +1,59 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 /*=============================================================================
-	ThinOutlineRecord.usf: updates the per-pixel crease edge records with this frame's jittered sample.
+	ThinOutlineRecord.usf: updates the per-pixel edge records with this frame's jittered sample.
 
 	The previous frame's records are fetched at the reprojected pixel (nearest pixel) and moved into this pixel's
-	local coordinates, unless the history is rejected by depth. Then this frame's crease checks add their samples.
+	local coordinates, unless the history is rejected. Then this frame's edge checks add their samples.
+
+	Crease records belong to the pixel's own surface: they move with its velocity and are kept while their depth
+	matches the surface around the pixel.
+	Silhouette records belong to the contour of the foreground next to the pixel, which the outline wraps around:
+	they move with the foreground's velocity and are kept while their foreground depth matches, and while the
+	direction the foreground is seen from has not turned too far (the contour slides over the surface when it does).
+	Sky pixels have silhouette records only.
 =============================================================================*/
 
 #include "ThinOutlineCommon.ush"
 
-Texture2D<float4> HistoryHorizontalA;
-Texture2D<float4> HistoryHorizontalB;
-Texture2D<float4> HistoryVerticalA;
-Texture2D<float4> HistoryVerticalB;
-Texture2D<float> HistoryDepth;
+Texture2D<float4> HistoryCreaseHorizontalA;
+Texture2D<float4> HistoryCreaseHorizontalB;
+Texture2D<float4> HistoryCreaseVerticalA;
+Texture2D<float4> HistoryCreaseVerticalB;
+Texture2D<float4> HistorySilhouetteHorizontalA;
+Texture2D<float4> HistorySilhouetteHorizontalB;
+Texture2D<float4> HistorySilhouetteVerticalA;
+Texture2D<float4> HistorySilhouetteVerticalB;
+// Kept ratio of the (horizontal, vertical) silhouette records.
+Texture2D<float2> HistorySilhouetteKept;
+// (linear depth of the pixel's surface, linear depth of its foreground).
+Texture2D<float2> HistoryDepth;
 
-RWTexture2D<float4> RWHorizontalA;
-RWTexture2D<float4> RWHorizontalB;
-RWTexture2D<float4> RWVerticalA;
-RWTexture2D<float4> RWVerticalB;
-RWTexture2D<float> RWDepth;
+RWTexture2D<float4> RWCreaseHorizontalA;
+RWTexture2D<float4> RWCreaseHorizontalB;
+RWTexture2D<float4> RWCreaseVerticalA;
+RWTexture2D<float4> RWCreaseVerticalB;
+RWTexture2D<float4> RWSilhouetteHorizontalA;
+RWTexture2D<float4> RWSilhouetteHorizontalB;
+RWTexture2D<float4> RWSilhouetteVerticalA;
+RWTexture2D<float4> RWSilhouetteVerticalB;
+RWTexture2D<float2> RWSilhouetteKept;
+RWTexture2D<float2> RWDepth;
 
 // This frame's G-buffer sample position inside its rendering pixel, in pixel-local coordinates [0, 1]^2.
 float2 SampleLocalPosition;
 // 1 - decay rate, applied to the sample counts once per frame.
 float SampleCountDecay;
-// Relative depth tolerance of the history depth test.
+// Relative depth tolerance of the history depth tests.
 float HistoryDepthThreshold;
+// Cosine of the largest angle the view direction of a silhouette may turn by in one frame.
+float SilhouetteHistoryCosAngle;
 uint bHistoryValid;
+
+float2 ViewportPosToScreenPos(int2 ViewportPos)
+{
+	return (float2(ViewportPos) + 0.5) * View.ViewSizeAndInvSize.zw * float2(2.0, -2.0) + float2(-1.0, 1.0);
+}
 
 // Screen velocity (and device Z velocity) of a pixel that did not draw velocity: camera motion only.
 float3 ComputeStaticVelocity(float2 ScreenPos, float DeviceZ)
@@ -37,9 +63,28 @@ float3 ComputeStaticVelocity(float2 ScreenPos, float DeviceZ)
 	return PosN - PrevClip.xyz / PrevClip.w;
 }
 
-// Fetches the previous frame's records of the surface under this pixel, moved into this pixel's local coordinates.
-// Returns false when there is no usable history.
-bool ReprojectRecords(
+float3 GetPixelVelocity(int2 PixelPos, float DeviceZ)
+{
+	const float4 EncodedVelocity = SceneTexturesStruct.GBufferVelocityTexture.Load(int3(PixelPos, 0));
+	return EncodedVelocity.x > 0.0
+		? DecodeVelocityFromTexture(EncodedVelocity)
+		: ComputeStaticVelocity(ViewportPosToScreenPos(PixelPos - int2(View.ViewRectMin.xy)), DeviceZ);
+}
+
+// The history pixel of a point at ScreenPos that moved by ScreenVelocity, and this pixel's center relative to the
+// center of the history pixel. Returns false when the point was outside the view.
+bool GetHistoryPixel(float2 ScreenPos, float2 ScreenVelocity, out int2 PrevPixel, out float2 Offset)
+{
+	const float2 ViewSize = View.ViewSizeAndInvSize.xy;
+	const float2 PrevViewportPos = ((ScreenPos - ScreenVelocity) * float2(0.5, -0.5) + 0.5) * ViewSize;
+	PrevPixel = int2(floor(PrevViewportPos));
+	Offset = PrevViewportPos - (float2(PrevPixel) + 0.5);
+	return all(PrevPixel >= 0) && all(PrevPixel < int2(ViewSize));
+}
+
+// Fetches the previous frame's crease records of the surface under this pixel, moved into this pixel's local
+// coordinates. Returns false when there is no usable history.
+bool ReprojectCreaseRecords(
 	int2 ViewportPos,
 	int2 PixelPos,
 	FThinOutlineSample Center,
@@ -50,17 +95,11 @@ bool ReprojectRecords(
 	HorizontalRecord = GetEmptyRecord();
 	VerticalRecord = GetEmptyRecord();
 
-	const float2 ViewSize = View.ViewSizeAndInvSize.xy;
-	const float2 ScreenPos = (float2(ViewportPos) + 0.5) * View.ViewSizeAndInvSize.zw * float2(2.0, -2.0) + float2(-1.0, 1.0);
+	const float3 Velocity = GetPixelVelocity(PixelPos, Center.DeviceZ);
 
-	const float4 EncodedVelocity = SceneTexturesStruct.GBufferVelocityTexture.Load(int3(PixelPos, 0));
-	const float3 Velocity = EncodedVelocity.x > 0.0
-		? DecodeVelocityFromTexture(EncodedVelocity)
-		: ComputeStaticVelocity(ScreenPos, Center.DeviceZ);
-
-	const float2 PrevViewportPos = ((ScreenPos - Velocity.xy) * float2(0.5, -0.5) + 0.5) * ViewSize;
-	const int2 PrevPixel = int2(floor(PrevViewportPos));
-	if (any(PrevPixel < 0) || any(PrevPixel >= int2(ViewSize)))
+	int2 PrevPixel;
+	float2 Offset;
+	if (!GetHistoryPixel(ViewportPosToScreenPos(ViewportPos), Velocity.xy, PrevPixel, Offset))
 	{
 		return false;
 	}
@@ -85,18 +124,138 @@ bool ReprojectRecords(
 	const float DepthShift = PrevDepth - Center.Depth;
 	const float Tolerance = HistoryDepthThreshold * PrevDepth;
 
-	const float StoredDepth = HistoryDepth.Load(int3(PrevPixel, 0));
+	const float StoredDepth = HistoryDepth.Load(int3(PrevPixel, 0)).x;
 	const bool bDepthMatch = StoredDepth >= MinDepth + DepthShift - Tolerance && StoredDepth <= MaxDepth + DepthShift + Tolerance;
 	if (!bDepthMatch)
 	{
 		return false;
 	}
 
-	HorizontalRecord = UnpackRecord(HistoryHorizontalA.Load(int3(PrevPixel, 0)), HistoryHorizontalB.Load(int3(PrevPixel, 0)));
-	VerticalRecord = UnpackRecord(HistoryVerticalA.Load(int3(PrevPixel, 0)), HistoryVerticalB.Load(int3(PrevPixel, 0)));
+	HorizontalRecord = UnpackRecord(HistoryCreaseHorizontalA.Load(int3(PrevPixel, 0)), HistoryCreaseHorizontalB.Load(int3(PrevPixel, 0)));
+	VerticalRecord = UnpackRecord(HistoryCreaseVerticalA.Load(int3(PrevPixel, 0)), HistoryCreaseVerticalB.Load(int3(PrevPixel, 0)));
 
-	// This pixel's center relative to the center of the history pixel.
-	const float2 Offset = PrevViewportPos - (float2(PrevPixel) + 0.5);
+	ShiftRecord(HorizontalRecord, Offset.xy);
+	ShiftRecord(VerticalRecord, Offset.yx);
+	return true;
+}
+
+// The foreground a silhouette record next to this pixel belongs to: the nearest pixel within two pixels along the
+// axes, the pixel itself included. A record belongs to a pixel at most one pixel from the contour, and a pixel
+// one pixel outside it may see only background in its axial neighbours this frame.
+struct FThinOutlineForeground
+{
+	int2 PixelPos;
+	float DeviceZ;
+	float Depth;
+	bool bIsSky;
+	// Depth range of the foreground's surface around it (its axial neighbours on the same surface included): the
+	// jitter moves the samples by up to a pixel, which on a surface seen at a grazing angle is a large depth change.
+	float MinDepth;
+	float MaxDepth;
+};
+
+FThinOutlineForeground FindForeground(int2 PixelPos, FThinOutlineSample Center, FThinOutlineSample Neighbours[4], float FarDeviceZ[4])
+{
+	FThinOutlineForeground Foreground;
+	Foreground.PixelPos = PixelPos;
+	Foreground.DeviceZ = Center.DeviceZ;
+
+	// Reversed Z: nearer is larger.
+	UNROLL
+	for (uint Index = 0; Index < 4; ++Index)
+	{
+		if (Neighbours[Index].DeviceZ > Foreground.DeviceZ)
+		{
+			Foreground.PixelPos = ClampToViewRect(PixelPos + NeighbourOffsets[Index]);
+			Foreground.DeviceZ = Neighbours[Index].DeviceZ;
+		}
+		if (FarDeviceZ[Index] > Foreground.DeviceZ)
+		{
+			Foreground.PixelPos = ClampToViewRect(PixelPos + 2 * NeighbourOffsets[Index]);
+			Foreground.DeviceZ = FarDeviceZ[Index];
+		}
+	}
+
+	Foreground.bIsSky = IsSkyDeviceZ(Foreground.DeviceZ);
+	Foreground.Depth = DeviceZToDepth(Foreground.DeviceZ);
+	Foreground.MinDepth = Foreground.Depth;
+	Foreground.MaxDepth = Foreground.Depth;
+
+	if (!Foreground.bIsSky)
+	{
+		float NeighbourDepths[4];
+		UNROLL
+		for (uint Index = 0; Index < 4; ++Index)
+		{
+			NeighbourDepths[Index] = DeviceZToDepth(LoadDeviceZ(Foreground.PixelPos + NeighbourOffsets[Index]));
+		}
+
+		UNROLL
+		for (uint Index = 0; Index < 4; ++Index)
+		{
+			if (GetDepthEdgeMeasure(Foreground.Depth, NeighbourDepths[Index], NeighbourDepths[Index ^ 1]) <= SilhouetteThreshold)
+			{
+				Foreground.MinDepth = min(Foreground.MinDepth, NeighbourDepths[Index]);
+				Foreground.MaxDepth = max(Foreground.MaxDepth, NeighbourDepths[Index]);
+			}
+		}
+	}
+	return Foreground;
+}
+
+// Fetches the previous frame's silhouette records of the foreground contour next to this pixel, moved into this
+// pixel's local coordinates. Returns false when there is no usable history.
+bool ReprojectSilhouetteRecords(
+	int2 ViewportPos,
+	FThinOutlineForeground Foreground,
+	out FThinOutlineRecord HorizontalRecord,
+	out FThinOutlineRecord VerticalRecord)
+{
+	HorizontalRecord = GetEmptyRecord();
+	VerticalRecord = GetEmptyRecord();
+
+	// Without geometry around, there is no contour.
+	if (Foreground.bIsSky)
+	{
+		return false;
+	}
+
+	const float3 Velocity = GetPixelVelocity(Foreground.PixelPos, Foreground.DeviceZ);
+	const float2 ScreenPos = ViewportPosToScreenPos(ViewportPos);
+
+	int2 PrevPixel;
+	float2 Offset;
+	if (!GetHistoryPixel(ScreenPos, Velocity.xy, PrevPixel, Offset))
+	{
+		return false;
+	}
+
+	// The history stored the depth of its foreground. Expected depth range of this foreground in the previous frame:
+	const float PrevDepth = ConvertFromDeviceZ(Foreground.DeviceZ - Velocity.z);
+	const float DepthShift = PrevDepth - Foreground.Depth;
+	const float Tolerance = HistoryDepthThreshold * PrevDepth;
+
+	const float StoredDepth = HistoryDepth.Load(int3(PrevPixel, 0)).y;
+	if (StoredDepth < Foreground.MinDepth + DepthShift - Tolerance || StoredDepth > Foreground.MaxDepth + DepthShift + Tolerance)
+	{
+		return false;
+	}
+
+	// Translated world view directions. Directions do not depend on the frame's translation, so they can be compared.
+	const float3 ViewDirection = normalize(mul(float4(ScreenPos, 1.0, 0.0), View.ScreenToTranslatedWorld).xyz);
+	const float3 PrevViewDirection = normalize(mul(float4(ScreenPos - Velocity.xy, 1.0, 0.0), View.PrevScreenToTranslatedWorld).xyz);
+	if (dot(ViewDirection, PrevViewDirection) < SilhouetteHistoryCosAngle)
+	{
+		return false;
+	}
+
+	HorizontalRecord = UnpackRecord(HistorySilhouetteHorizontalA.Load(int3(PrevPixel, 0)), HistorySilhouetteHorizontalB.Load(int3(PrevPixel, 0)));
+	VerticalRecord = UnpackRecord(HistorySilhouetteVerticalA.Load(int3(PrevPixel, 0)), HistorySilhouetteVerticalB.Load(int3(PrevPixel, 0)));
+
+	const float2 KeptRatio = HistorySilhouetteKept.Load(int3(PrevPixel, 0));
+	HorizontalRecord.KeptRatio = KeptRatio.x;
+	VerticalRecord.KeptRatio = KeptRatio.y;
+
 	ShiftRecord(HorizontalRecord, Offset.xy);
 	ShiftRecord(VerticalRecord, Offset.yx);
 	return true;
@@ -112,11 +271,11 @@ void AddAxisSamples(inout FThinOutlineRecord Record, float2 Sample, float FirstS
 
 	if (bFirst)
 	{
-		AddRecordSample(Record, Sample, CoTrigger, FirstStrength);
+		AddRecordSample(Record, Sample, 1.0, CoTrigger, FirstStrength);
 	}
 	if (bSecond)
 	{
-		AddRecordSample(Record, Sample + float2(0.5, 0.0), CoTrigger, SecondStrength);
+		AddRecordSample(Record, Sample + float2(0.5, 0.0), 0.0, CoTrigger, SecondStrength);
 	}
 }
 
@@ -143,36 +302,67 @@ void MainCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 	FThinOutlineSample Neighbours[4];
 	LoadOutlineNeighbourhood(PixelPos, Center, Neighbours);
 
-	FThinOutlineRecord HorizontalRecord = GetEmptyRecord();
-	FThinOutlineRecord VerticalRecord = GetEmptyRecord();
+	float FarDeviceZ[4];
+	LoadFarDeviceZ(PixelPos, FarDeviceZ);
 
-	// Sky has no surface to keep a record for.
+	const FThinOutlineEdges Edges = DetectEdges(Center, Neighbours, FarDeviceZ);
+
+	// Creases. Sky has no surface to keep a record for.
+	FThinOutlineRecord CreaseHorizontal = GetEmptyRecord();
+	FThinOutlineRecord CreaseVertical = GetEmptyRecord();
+
 	if (!Center.bIsSky)
 	{
 		if (bHistoryValid != 0)
 		{
-			ReprojectRecords(ViewportPos, PixelPos, Center, Neighbours, HorizontalRecord, VerticalRecord);
+			ReprojectCreaseRecords(ViewportPos, PixelPos, Center, Neighbours, CreaseHorizontal, CreaseVertical);
 		}
 
-		HorizontalRecord.SampleCount *= SampleCountDecay;
-		VerticalRecord.SampleCount *= SampleCountDecay;
+		CreaseHorizontal.SampleCount *= SampleCountDecay;
+		CreaseVertical.SampleCount *= SampleCountDecay;
 
-		const FThinOutlineEdges Edges = DetectEdges(Center, Neighbours);
-		AddAxisSamples(HorizontalRecord, SampleLocalPosition.xy, Edges.Crease[0], Edges.Crease[1]);
-		AddAxisSamples(VerticalRecord, SampleLocalPosition.yx, Edges.Crease[2], Edges.Crease[3]);
+		AddAxisSamples(CreaseHorizontal, SampleLocalPosition.xy, Edges.Crease[0], Edges.Crease[1]);
+		AddAxisSamples(CreaseVertical, SampleLocalPosition.yx, Edges.Crease[2], Edges.Crease[3]);
 
-		FinalizeRecord(HorizontalRecord);
-		FinalizeRecord(VerticalRecord);
+		FinalizeRecord(CreaseHorizontal);
+		FinalizeRecord(CreaseVertical);
 	}
 
-	float4 HorizontalA, HorizontalB, VerticalA, VerticalB;
-	PackRecord(HorizontalRecord, HorizontalA, HorizontalB);
-	PackRecord(VerticalRecord, VerticalA, VerticalB);
+	// Silhouettes, also on sky pixels, which are the background of a silhouette against the sky.
+	const FThinOutlineForeground Foreground = FindForeground(PixelPos, Center, Neighbours, FarDeviceZ);
 
-	RWHorizontalA[ViewportPos] = HorizontalA;
-	RWHorizontalB[ViewportPos] = HorizontalB;
-	RWVerticalA[ViewportPos] = VerticalA;
-	RWVerticalB[ViewportPos] = VerticalB;
-	// Zero never passes the depth test, so sky pixels do not hand out history.
-	RWDepth[ViewportPos] = Center.bIsSky ? 0.0 : Center.Depth;
+	FThinOutlineRecord SilhouetteHorizontal = GetEmptyRecord();
+	FThinOutlineRecord SilhouetteVertical = GetEmptyRecord();
+
+	if (bHistoryValid != 0)
+	{
+		ReprojectSilhouetteRecords(ViewportPos, Foreground, SilhouetteHorizontal, SilhouetteVertical);
+	}
+
+	SilhouetteHorizontal.SampleCount *= SampleCountDecay;
+	SilhouetteVertical.SampleCount *= SampleCountDecay;
+
+	AddAxisSamples(SilhouetteHorizontal, SampleLocalPosition.xy, Edges.Silhouette[0], Edges.Silhouette[1]);
+	AddAxisSamples(SilhouetteVertical, SampleLocalPosition.yx, Edges.Silhouette[2], Edges.Silhouette[3]);
+
+	FinalizeRecord(SilhouetteHorizontal);
+	FinalizeRecord(SilhouetteVertical);
+
+	float4 A, B;
+	PackRecord(CreaseHorizontal, A, B);
+	RWCreaseHorizontalA[ViewportPos] = A;
+	RWCreaseHorizontalB[ViewportPos] = B;
+	PackRecord(CreaseVertical, A, B);
+	RWCreaseVerticalA[ViewportPos] = A;
+	RWCreaseVerticalB[ViewportPos] = B;
+	PackRecord(SilhouetteHorizontal, A, B);
+	RWSilhouetteHorizontalA[ViewportPos] = A;
+	RWSilhouetteHorizontalB[ViewportPos] = B;
+	PackRecord(SilhouetteVertical, A, B);
+	RWSilhouetteVerticalA[ViewportPos] = A;
+	RWSilhouetteVerticalB[ViewportPos] = B;
+	RWSilhouetteKept[ViewportPos] = float2(SilhouetteHorizontal.KeptRatio, SilhouetteVertical.KeptRatio);
+
+	// Zero never passes the depth tests, so sky does not hand out history.
+	RWDepth[ViewportPos] = float2(Center.bIsSky ? 0.0 : Center.Depth, Foreground.bIsSky ? 0.0 : Foreground.Depth);
 }

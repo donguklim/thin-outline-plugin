@@ -24,7 +24,7 @@ void FThinOutlineModule::StartupModule()
 	AddShaderSourceDirectoryMapping(TEXT("/Plugin/ThinOutline"), PluginShaderDir);
 
 	// Project Settings > Plugins > Thin Outline stores its CVar-backed values under the CVar names.
-	// Only apply keys that are registered console variables, so non-CVar settings (e.g. OutlineColor)
+	// Only apply keys that are registered console variables, so non-CVar settings (e.g. SilhouetteColor)
 	// do not create dummy console variables.
 	UE::ConfigUtilities::ForEachCVarInSectionFromIni(TEXT("/Script/ThinOutline.ThinOutlineSettings"), *GEngineIni,
 		[](IConsoleVariable* CVar, const FString& KeyString, const FString& ValueString)

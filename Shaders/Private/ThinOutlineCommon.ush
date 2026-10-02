@@ -7,10 +7,13 @@
 	opposite side of C:
 
 	Silhouette (linear depth, i.e. distance from the camera plane):
-		The gradient from O to C is added to C to get the expected depth at N.
-		Measure = min(|N - (C + (C - O))|, |N - C|) / max(C, 1)
-		Only counted on the background pixel (C farther than N).
-		A sky pixel (no depth) with any non-sky axial neighbour is always a full silhouette.
+		The gradient from O to C is added to C to get the expected depth at N, and the gradient from F (the pixel
+		beyond N) to N is added to N to get the expected depth at C.
+		Measure = min(|N - (C + (C - O))|, |C - (N + (N - F))|, |N - C|) / max(C, 1)
+		The second term keeps a surface seen at a grazing angle continuous next to a real silhouette, where O lies
+		across it and the first term cannot extrapolate.
+		Only counted on the background pixel (C farther than N), so a check fires toward the foreground.
+		A sky pixel (no depth) is a full silhouette toward every non-sky axial neighbour.
 
 	Crease (world normals):
 		Measure = min(|cross(C, N) - cross(O, C)|, |cross(C, N)|)
@@ -19,7 +22,7 @@
 
 	Strength = Measure > Threshold ? saturate((Measure - Threshold) * Scale) : 0
 
-	Edge records, one per inducer axis (horizontal = left/right checks, vertical = top/bottom checks):
+	Edge records, one per edge type and inducer axis (horizontal = left/right checks, vertical = top/bottom checks):
 	Every frame, a check that fires adds this frame's jittered sample position (u, v) to the record of its axis, in
 	pixel-local coordinates [0, 1]^2. u is the coordinate along the axis (x for horizontal), v the other one.
 	Samples of the left (top) check are added as they are, samples of the right (bottom) check are moved by +0.5
@@ -27,6 +30,8 @@
 	least squares u = a + b v of the record gives the edge E = 2a - 1 + 2b v.
 	The statistics are decayed running averages: every frame, the sample count n is multiplied by (1 - d), and a new
 	sample is averaged in with weight 1 / n, so samples are weighted by (1 - d)^age.
+	A silhouette is only sampled by its background pixels, through the check facing the foreground, so the fraction
+	of samples that came through the left (top) check says on which side the foreground is.
 =============================================================================*/
 
 #pragma once
@@ -51,6 +56,10 @@ float CreaseScale;
 #define THIN_OUTLINE_MIN_FIT_SAMPLE_COUNT 3.0
 #define THIN_OUTLINE_MIN_FIT_VARIANCE 1.0e-4
 
+// An outline band crosses a pixel when it covers more than this fraction of it. Rounding leaves a band that only touches
+// the pixel with a tiny area of either sign; such a band must not win the edge selection over one that covers the pixel.
+#define THIN_OUTLINE_MIN_BAND_AREA 1.0e-4
+
 // Ordered so that (Index ^ 1) is the opposite neighbour: left, right, top, bottom.
 static const int2 NeighbourOffsets[4] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
 
@@ -69,16 +78,26 @@ struct FThinOutlineSample
 	bool bHasNormal;
 };
 
+bool IsSkyDeviceZ(float DeviceZ)
+{
+	return DeviceZ <= 1e-7;
+}
+
+float DeviceZToDepth(float DeviceZ)
+{
+	return IsSkyDeviceZ(DeviceZ) ? THIN_OUTLINE_FAR_DEPTH : ConvertFromDeviceZ(DeviceZ);
+}
+
 FThinOutlineSample LoadOutlineSample(uint2 PixelPos)
 {
 	FThinOutlineSample Sample;
 
 	const float DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(PixelPos, 0)).r;
-	const bool bFarPlane = DeviceZ <= 1e-7;
+	const bool bFarPlane = IsSkyDeviceZ(DeviceZ);
 
 	Sample.DeviceZ = DeviceZ;
 	Sample.bIsSky = bFarPlane;
-	Sample.Depth = bFarPlane ? THIN_OUTLINE_FAR_DEPTH : ConvertFromDeviceZ(DeviceZ);
+	Sample.Depth = DeviceZToDepth(DeviceZ);
 	Sample.TranslatedWorldPosition = bFarPlane ? float3(0, 0, 0) : SvPositionToTranslatedWorld(float4(float2(PixelPos) + 0.5, DeviceZ, 1.0));
 
 #if SUBSTRATE_GBUFFER_FORMAT == 1
@@ -95,19 +114,38 @@ FThinOutlineSample LoadOutlineSample(uint2 PixelPos)
 	return Sample;
 }
 
+// Depth and G-buffer are addressed with the scene renderer's view rect.
+int2 ClampToViewRect(int2 PixelPos)
+{
+	const int2 ViewRectMin = int2(View.ViewRectMin.xy);
+	const int2 ViewRectMax = ViewRectMin + int2(View.ViewSizeAndInvSize.xy) - 1;
+	return clamp(PixelPos, ViewRectMin, ViewRectMax);
+}
+
 // Loads the target pixel and its axial neighbours (clamped to the view rect) in NeighbourOffsets order.
 void LoadOutlineNeighbourhood(int2 PixelPos, out FThinOutlineSample Center, out FThinOutlineSample Neighbours[4])
 {
-	// Depth and G-buffer are addressed with the scene renderer's view rect.
-	const int2 ViewRectMin = int2(View.ViewRectMin.xy);
-	const int2 ViewRectMax = ViewRectMin + int2(View.ViewSizeAndInvSize.xy) - 1;
-
 	Center = LoadOutlineSample(uint2(PixelPos));
 
 	UNROLL
 	for (uint NeighbourIndex = 0; NeighbourIndex < 4; ++NeighbourIndex)
 	{
-		Neighbours[NeighbourIndex] = LoadOutlineSample(uint2(clamp(PixelPos + NeighbourOffsets[NeighbourIndex], ViewRectMin, ViewRectMax)));
+		Neighbours[NeighbourIndex] = LoadOutlineSample(uint2(ClampToViewRect(PixelPos + NeighbourOffsets[NeighbourIndex])));
+	}
+}
+
+float LoadDeviceZ(int2 PixelPos)
+{
+	return SceneTexturesStruct.SceneDepthTexture.Load(int3(ClampToViewRect(PixelPos), 0)).r;
+}
+
+// Device Z of the pixels two steps away from the target (clamped to the view rect), in NeighbourOffsets order.
+void LoadFarDeviceZ(int2 PixelPos, out float FarDeviceZ[4])
+{
+	UNROLL
+	for (uint Index = 0; Index < 4; ++Index)
+	{
+		FarDeviceZ[Index] = LoadDeviceZ(PixelPos + 2 * NeighbourOffsets[Index]);
 	}
 }
 
@@ -118,6 +156,13 @@ float GetDepthEdgeMeasure(float DepthC, float DepthN, float DepthO)
 	const float ExtrapolationError = abs(DepthN - ExpectedDepthN);
 	const float Difference = abs(DepthN - DepthC);
 	return min(ExtrapolationError, Difference) / max(DepthC, 1.0);
+}
+
+// Same, also extrapolating the depth gradient from F, the pixel beyond N, through N.
+float GetDepthEdgeMeasure(float DepthC, float DepthN, float DepthO, float DepthF)
+{
+	const float ExpectedDepthC = DepthN + (DepthN - DepthF);
+	return min(GetDepthEdgeMeasure(DepthC, DepthN, DepthO), abs(DepthC - ExpectedDepthC) / max(DepthC, 1.0));
 }
 
 // Normal discontinuity between the target C and the neighbour N, extrapolating the normal rotation from O through C.
@@ -135,44 +180,41 @@ float GetEdgeStrength(float Measure, float Threshold, float Scale)
 
 struct FThinOutlineEdges
 {
-	float Silhouette;
-	// Crease strength of each axial direction (NeighbourOffsets order). All zero when the pixel has a silhouette.
+	// Silhouette strength of each axial direction (NeighbourOffsets order); the neighbour is the foreground.
+	float Silhouette[4];
+	// Largest of Silhouette[].
+	float MaxSilhouette;
+	// Crease strength of each axial direction. All zero when the pixel has a silhouette.
 	float Crease[4];
 	// Whether the crease of each direction is a ridge (convex) rather than a valley.
 	bool bRidge[4];
 };
 
-FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neighbours[4])
+// FarDeviceZ: see LoadFarDeviceZ.
+FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neighbours[4], float FarDeviceZ[4])
 {
 	FThinOutlineEdges Edges;
-	Edges.Silhouette = 0.0;
+	Edges.MaxSilhouette = 0.0;
 
-	if (Center.bIsSky)
+	UNROLL
+	for (uint Index = 0; Index < 4; ++Index)
 	{
-		// A sky pixel next to any geometry is always a silhouette.
-		UNROLL
-		for (uint Index = 0; Index < 4; ++Index)
+		const FThinOutlineSample Neighbour = Neighbours[Index];
+		Edges.Silhouette[Index] = 0.0;
+
+		if (Center.bIsSky)
 		{
-			if (!Neighbours[Index].bIsSky)
-			{
-				Edges.Silhouette = 1.0;
-			}
+			// A sky pixel next to geometry is always a silhouette.
+			Edges.Silhouette[Index] = Neighbour.bIsSky ? 0.0 : 1.0;
 		}
-	}
-	else
-	{
-		UNROLL
-		for (uint Index = 0; Index < 4; ++Index)
+		else if (Center.Depth > Neighbour.Depth)
 		{
-			const FThinOutlineSample Neighbour = Neighbours[Index];
-
 			// Silhouettes belong to the background side only: the target must be farther than the neighbour.
-			if (Center.Depth > Neighbour.Depth)
-			{
-				const float DepthMeasure = GetDepthEdgeMeasure(Center.Depth, Neighbour.Depth, Neighbours[Index ^ 1].Depth);
-				Edges.Silhouette = max(Edges.Silhouette, GetEdgeStrength(DepthMeasure, SilhouetteThreshold, SilhouetteScale));
-			}
+			const float DepthMeasure = GetDepthEdgeMeasure(Center.Depth, Neighbour.Depth, Neighbours[Index ^ 1].Depth, DeviceZToDepth(FarDeviceZ[Index]));
+			Edges.Silhouette[Index] = GetEdgeStrength(DepthMeasure, SilhouetteThreshold, SilhouetteScale);
 		}
+
+		Edges.MaxSilhouette = max(Edges.MaxSilhouette, Edges.Silhouette[Index]);
 	}
 
 	UNROLL
@@ -188,7 +230,7 @@ FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neig
 		// Creases only exist between pixels of a depth-continuous surface. This also keeps the foreground side
 		// of a silhouette (which has no silhouette strength itself) free of creases.
 		const float DepthMeasure = GetDepthEdgeMeasure(Center.Depth, Neighbour.Depth, Opposite.Depth);
-		if (Edges.Silhouette <= 0.0 && Center.bHasNormal && Neighbour.bHasNormal && DepthMeasure <= SilhouetteThreshold)
+		if (Edges.MaxSilhouette <= 0.0 && Center.bHasNormal && Neighbour.bHasNormal && DepthMeasure <= SilhouetteThreshold)
 		{
 			// If the opposite pixel is not on the same surface, there is no normal rotation to extrapolate.
 			const bool bOppositeOnSurface = Opposite.bHasNormal
@@ -221,8 +263,11 @@ struct FThinOutlineRecord
 	float Covariance;
 	// Fraction of the samples that were recorded on frames where both checks of the axis fired.
 	float CoTriggerRatio;
-	// Mean crease strength of the samples.
+	// Mean edge strength of the samples.
 	float Strength;
+	// Fraction of the samples recorded through the left (top) check. Only stored for silhouettes, where it is close
+	// to 1 when the foreground is on the left (top) and close to 0 when it is on the right (bottom).
+	float KeptRatio;
 };
 
 FThinOutlineRecord GetEmptyRecord()
@@ -231,6 +276,7 @@ FThinOutlineRecord GetEmptyRecord()
 }
 
 // Two RGBA16F textures per axis: A = (n, mean u, mean v, co-trigger ratio), B = (variance u, variance v, covariance, strength).
+// The kept ratio of silhouette records is stored separately.
 FThinOutlineRecord UnpackRecord(float4 A, float4 B)
 {
 	FThinOutlineRecord Record;
@@ -250,7 +296,8 @@ void PackRecord(FThinOutlineRecord Record, out float4 A, out float4 B)
 }
 
 // Exponentially weighted update of the running mean and central moments with one new sample of weight 1.
-void AddRecordSample(inout FThinOutlineRecord Record, float2 Sample, float CoTrigger, float Strength)
+// Kept is 1 for a sample of the left (top) check, 0 for one of the right (bottom) check.
+void AddRecordSample(inout FThinOutlineRecord Record, float2 Sample, float Kept, float CoTrigger, float Strength)
 {
 	Record.SampleCount += 1.0;
 	const float Alpha = rcp(Record.SampleCount);
@@ -261,6 +308,7 @@ void AddRecordSample(inout FThinOutlineRecord Record, float2 Sample, float CoTri
 	Record.Covariance = (1.0 - Alpha) * (Record.Covariance + Alpha * Delta.x * Delta.y);
 	Record.CoTriggerRatio += Alpha * (CoTrigger - Record.CoTriggerRatio);
 	Record.Strength += Alpha * (Strength - Record.Strength);
+	Record.KeptRatio += Alpha * (Kept - Record.KeptRatio);
 }
 
 // Re-expresses a record in the local coordinates of a pixel whose origin is at Offset = (along, across) in the
@@ -288,6 +336,7 @@ FThinOutlineRecord MergeRecords(FThinOutlineRecord Record0, FThinOutlineRecord R
 	Merged.Covariance = Weight0 * (Record0.Covariance + Delta0.x * Delta0.y) + Weight1 * (Record1.Covariance + Delta1.x * Delta1.y);
 	Merged.CoTriggerRatio = Weight0 * Record0.CoTriggerRatio + Weight1 * Record1.CoTriggerRatio;
 	Merged.Strength = Weight0 * Record0.Strength + Weight1 * Record1.Strength;
+	Merged.KeptRatio = Weight0 * Record0.KeptRatio + Weight1 * Record1.KeptRatio;
 	return Merged;
 }
 
@@ -358,10 +407,11 @@ float GetHalfPlaneArea(float Offset, float Slope, float2 RectMin, float2 RectMax
 	return IntegrateRamp(G0, G1, Height) - IntegrateRamp(G0 - Width, G1 - Width, Height);
 }
 
-// Area of the band of half width HalfThickness around the line u = Intercept + Slope * v inside [RectMin, RectMax].
-float GetBandArea(float Intercept, float Slope, float HalfThickness, float2 RectMin, float2 RectMax)
+// Area inside [RectMin, RectMax] of the band of points whose signed distance from the line u = Intercept + Slope * v,
+// positive toward +u, lies in [BandMin, BandMax].
+float GetBandArea(float Intercept, float Slope, float BandMin, float BandMax, float2 RectMin, float2 RectMax)
 {
-	const float HalfWidthAlongU = HalfThickness * sqrt(1.0 + Slope * Slope);
-	return GetHalfPlaneArea(Intercept + HalfWidthAlongU, Slope, RectMin, RectMax)
-		- GetHalfPlaneArea(Intercept - HalfWidthAlongU, Slope, RectMin, RectMax);
+	const float DistanceToU = sqrt(1.0 + Slope * Slope);
+	return GetHalfPlaneArea(Intercept + BandMax * DistanceToU, Slope, RectMin, RectMax)
+		- GetHalfPlaneArea(Intercept + BandMin * DistanceToU, Slope, RectMin, RectMax);
 }

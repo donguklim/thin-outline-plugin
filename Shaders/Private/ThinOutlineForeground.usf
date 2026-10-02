@@ -1,0 +1,38 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+/*=============================================================================
+	ThinOutlineForeground.usf: gives the pixels painted with a silhouette the depth and velocity of their foreground.
+
+	Drawn into the scene depth (depth test always passes) and, if the scene has one, the velocity texture. They are the
+	textures the temporal upscaler reads, so it moves the outline with the foreground instead of the background.
+	The values were picked by the composite pass (ThinOutline.usf), which can still read the scene depth and velocity.
+=============================================================================*/
+
+#include "/Engine/Private/Common.ush"
+
+// Device Z to write, 0 where the pixel keeps its own depth and velocity.
+Texture2D<float> ForegroundDeviceZ;
+// Encoded velocity to write, as read from the velocity texture.
+Texture2D<float4> ForegroundVelocity;
+int2 ViewRectMin;
+
+void MainPS(
+	float4 SvPosition : SV_POSITION,
+	out float OutDepth : SV_Depth
+#if WRITE_VELOCITY
+	, out float4 OutVelocity : SV_Target0
+#endif
+	)
+{
+	const int3 Texel = int3(int2(SvPosition.xy) - ViewRectMin, 0);
+	const float DeviceZ = ForegroundDeviceZ.Load(Texel);
+	if (DeviceZ <= 0.0)
+	{
+		discard;
+	}
+
+	OutDepth = DeviceZ;
+#if WRITE_VELOCITY
+	OutVelocity = ForegroundVelocity.Load(Texel);
+#endif
+}

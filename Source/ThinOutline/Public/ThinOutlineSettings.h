@@ -7,7 +7,7 @@
 #include "ThinOutlineSettings.generated.h"
 
 /**
- * Project-wide defaults of the crease outline passes (Project Settings > Plugins > Thin Outline).
+ * Project-wide defaults of the outline passes (Project Settings > Plugins > Thin Outline).
  * Properties with a ConsoleVariable are mirrored to that console variable, so they can also be tweaked at runtime.
  */
 UCLASS(config = Engine, defaultconfig, meta = (DisplayName = "Thin Outline"))
@@ -19,18 +19,21 @@ public:
 	UThinOutlineSettings(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
 	/**
-	 * Draws crease outlines into scene color at rendering resolution, before TSR/TAA/third party upscalers.
+	 * Draws silhouette and crease outlines into scene color at rendering resolution, before TSR/TAA/third party upscalers.
 	 * The edges are reconstructed over time from the jittered G-buffer edge checks, so they need temporal anti-aliasing.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "General", meta = (ConsoleVariable = "r.ThinOutline.Enable", DisplayName = "Enable Outlines"))
 	bool bEnable;
 
-	/** Outline color. Written into pre-exposed HDR scene color, so it does not depend on exposure, but it is still tonemapped. */
-	UPROPERTY(config, EditAnywhere, Category = "General", meta = (HideAlphaChannel))
-	FLinearColor OutlineColor;
+	/**
+	 * Silhouette outline color. Written into pre-exposed HDR scene color, so it does not depend on exposure, but it is still tonemapped.
+	 * Pixels painted with a silhouette also get the depth and velocity of the foreground, so the temporal upscaler moves the outline with it.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (HideAlphaChannel))
+	FLinearColor SilhouetteColor;
 
 	/**
-	 * Silhouettes are not drawn yet. A pixel with a silhouette (on the background side of a depth discontinuity) is not a crease candidate.
+	 * Silhouette edges sit on depth discontinuities and are drawn on the background side only. A pixel with a silhouette is not a crease candidate.
 	 * Edge measure: min(|second difference|, |first difference|) of linear depth, divided by the target pixel's linear depth.
 	 * Measures at or below this threshold produce no silhouette.
 	 * Sky pixels (no depth) next to any geometry are always full silhouettes, regardless of this threshold.
@@ -41,6 +44,24 @@ public:
 	/** Silhouette strength = saturate((Measure - Threshold) * Scale). */
 	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.Scale", ClampMin = "0.0", UIMax = "500.0"))
 	float SilhouetteScale;
+
+	/**
+	 * Silhouette outline thickness in display pixels (pixels after the temporal upscaler), on the background side of the edge.
+	 * It does not reach further than about one rendering pixel beyond the edge.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.Thickness", ClampMin = "0.0", UIMax = "4.0"))
+	float SilhouetteThickness;
+
+	/**
+	 * Silhouette records are rejected when the direction their foreground is seen from turns by more than this many degrees in one frame,
+	 * since a silhouette slides over the surface as the view direction changes.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.HistoryViewAngle", ClampMin = "0.0", UIMax = "30.0", Units = "Degrees"))
+	float SilhouetteHistoryViewAngle;
+
+	/** Crease outline color. Written into pre-exposed HDR scene color, so it does not depend on exposure, but it is still tonemapped. */
+	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (HideAlphaChannel))
+	FLinearColor CreaseColor;
 
 	/**
 	 * Threshold for convex creases. Creases are only drawn on pixels without a silhouette.
@@ -83,8 +104,9 @@ public:
 	float SlopeStandardErrorThreshold;
 
 	/**
-	 * Relative depth tolerance for keeping a reprojected edge record. The record is kept if its depth lies within the depth range
-	 * of the pixel's surface neighbourhood, widened by this fraction of the depth.
+	 * Relative depth tolerance for keeping a reprojected edge record. A crease record is kept if its depth lies within the depth range
+	 * of the pixel's surface neighbourhood, widened by this fraction of the depth. A silhouette record is kept if its foreground depth
+	 * is within this fraction of the current foreground depth.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Estimator", meta = (ConsoleVariable = "r.ThinOutline.Estimator.HistoryDepthThreshold", ClampMin = "0.0", UIMax = "0.2"))
 	float HistoryDepthThreshold;

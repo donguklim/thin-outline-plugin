@@ -6,12 +6,14 @@
 
 extern TAutoConsoleVariable<int32> CVarThinOutlineEnable;
 
-// 0 = composite the crease outline into scene color, 1..3 = debug views (see the CVar help)
+// 0 = composite the outline into scene color, 1..5 = debug views (see the CVar help)
 extern TAutoConsoleVariable<int32> CVarThinOutlineDebugView;
 
 // Silhouette (depth discontinuity)
 extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteThreshold;
 extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteScale;
+extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteThickness;
+extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteHistoryViewAngle;
 
 // Crease (normal discontinuity)
 extern TAutoConsoleVariable<float> CVarThinOutlineCreaseRidgeThreshold;

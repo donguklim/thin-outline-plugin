@@ -1,20 +1,27 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 /*=============================================================================
-	ThinOutline.usf: draws the crease outline reconstructed from the edge records at rendering resolution.
+	ThinOutline.usf: draws the outline reconstructed from the edge records at rendering resolution.
 
-	Per axis, a pixel fits the pooled samples of its own record and its two neighbours' along the axis, weighted by
-	their sample counts. The neighbours' records are shifted into the pixel's coordinates by -0.5 (left/top neighbour)
-	and +0.5 (right/bottom neighbour). Around an edge all three describe the same line, so neighbouring pixels pool
-	nearly the same samples, and a pixel whose own history was just reset still gets its neighbours' data. Records
-	with a co-trigger ratio above the threshold mix in a second edge and are left out; a pixel whose own record is
-	above it has no edge on that axis.
+	Per edge type and axis, a pixel fits the pooled samples of its own record and its two neighbours' along the axis,
+	weighted by their sample counts. The neighbours' records are shifted into the pixel's coordinates by -0.5
+	(left/top neighbour) and +0.5 (right/bottom neighbour). Around an edge all three describe the same line, so
+	neighbouring pixels pool nearly the same samples, and a pixel whose own history was just reset still gets its
+	neighbours' data. Records with a co-trigger ratio above the threshold mix in a second edge and are left out; a
+	pixel whose own record is above it has no edge on that axis.
 
 	Of the two axes' edges, only those whose outline band crosses this pixel are candidates. Of two candidates, the one
 	with the clearly smaller slope standard error wins, otherwise the one with the smaller absolute slope.
+	A crease band is centered on the edge. A silhouette band lies on the background side of the edge only, so the
+	outline wraps around the foreground; the kept ratio of the records gives the side. A pixel without silhouette
+	samples of its own is foreground and draws no silhouette. Silhouette candidates take priority over creases.
 
 	The outline alpha is the edge strength times the fraction of the display pixel (temporal upscaler output) under
 	this frame's sample, clipped to this rendering pixel, that the outline band covers.
+
+	A pixel painted with a silhouette shows the foreground's contour, so the depth and velocity of the nearest pixel on
+	the foreground side are written out for ThinOutlineForeground.usf, which copies them into the scene depth and
+	velocity: the temporal upscaler then moves the outline with the foreground.
 =============================================================================*/
 
 #include "ThinOutlineCommon.ush"
@@ -25,17 +32,28 @@ SCREEN_PASS_TEXTURE_VIEWPORT(Output)
 
 Texture2D InputSceneColorTexture;
 
-Texture2D<float4> RecordHorizontalA;
-Texture2D<float4> RecordHorizontalB;
-Texture2D<float4> RecordVerticalA;
-Texture2D<float4> RecordVerticalB;
+Texture2D<float4> CreaseHorizontalA;
+Texture2D<float4> CreaseHorizontalB;
+Texture2D<float4> CreaseVerticalA;
+Texture2D<float4> CreaseVerticalB;
+Texture2D<float4> SilhouetteHorizontalA;
+Texture2D<float4> SilhouetteHorizontalB;
+Texture2D<float4> SilhouetteVerticalA;
+Texture2D<float4> SilhouetteVerticalB;
+Texture2D<float2> SilhouetteKept;
 
-float3 OutlineColor;
+// Device Z (0 where nothing is overwritten) and encoded velocity to give each pixel, indexed by viewport position.
+RWTexture2D<float> RWForegroundDeviceZ;
+RWTexture2D<float4> RWForegroundVelocity;
+
+float3 CreaseColor;
+float3 SilhouetteColor;
 // This frame's G-buffer sample position inside its rendering pixel, in pixel-local coordinates [0, 1]^2.
 float2 SampleLocalPosition;
 float2 RenderPixelsPerDisplayPixel;
-// Half the outline thickness, in rendering pixels.
-float HalfThickness;
+// Outline thicknesses, in rendering pixels.
+float CreaseThickness;
+float SilhouetteThickness;
 float CoTriggerThreshold;
 float SlopeStandardErrorThreshold;
 // The jitter sequence repeats every L frames, so a record that gets a sample on a fraction f of the frames holds about
@@ -48,18 +66,49 @@ uint DebugView;
 #define AXIS_HORIZONTAL 0
 #define AXIS_VERTICAL 1
 
-FThinOutlineRecord LoadRecord(uint Axis, int2 ViewportPos)
+#define EDGE_CREASE 0
+#define EDGE_SILHOUETTE 1
+
+FThinOutlineRecord LoadRecord(uint EdgeType, uint Axis, int2 ViewportPos)
 {
+	FThinOutlineRecord Record = GetEmptyRecord();
 	if (any(ViewportPos < 0) || any(ViewportPos >= int2(View.ViewSizeAndInvSize.xy)))
 	{
-		return GetEmptyRecord();
+		return Record;
 	}
 
-	if (Axis == AXIS_HORIZONTAL)
+	const int3 Texel = int3(ViewportPos, 0);
+	if (EdgeType == EDGE_CREASE)
 	{
-		return UnpackRecord(RecordHorizontalA.Load(int3(ViewportPos, 0)), RecordHorizontalB.Load(int3(ViewportPos, 0)));
+		if (Axis == AXIS_HORIZONTAL)
+		{
+			Record = UnpackRecord(CreaseHorizontalA.Load(Texel), CreaseHorizontalB.Load(Texel));
+		}
+		else
+		{
+			Record = UnpackRecord(CreaseVerticalA.Load(Texel), CreaseVerticalB.Load(Texel));
+		}
 	}
-	return UnpackRecord(RecordVerticalA.Load(int3(ViewportPos, 0)), RecordVerticalB.Load(int3(ViewportPos, 0)));
+	else
+	{
+		const float2 KeptRatio = SilhouetteKept.Load(Texel);
+		if (Axis == AXIS_HORIZONTAL)
+		{
+			Record = UnpackRecord(SilhouetteHorizontalA.Load(Texel), SilhouetteHorizontalB.Load(Texel));
+			Record.KeptRatio = KeptRatio.x;
+		}
+		else
+		{
+			Record = UnpackRecord(SilhouetteVerticalA.Load(Texel), SilhouetteVerticalB.Load(Texel));
+			Record.KeptRatio = KeptRatio.y;
+		}
+	}
+	return Record;
+}
+
+int2 GetAxisStep(uint Axis)
+{
+	return Axis == AXIS_HORIZONTAL ? int2(1, 0) : int2(0, 1);
 }
 
 // AlongOffset: this pixel's origin along the axis, in the record's coordinates.
@@ -72,14 +121,14 @@ void PoolRecord(inout FThinOutlineRecord Pooled, FThinOutlineRecord Record, floa
 	}
 }
 
-FThinOutlineRecord GetFitRecord(uint Axis, int2 ViewportPos, FThinOutlineRecord OwnRecord)
+FThinOutlineRecord GetFitRecord(uint EdgeType, uint Axis, int2 ViewportPos, FThinOutlineRecord OwnRecord)
 {
-	const int2 AxisStep = Axis == AXIS_HORIZONTAL ? int2(1, 0) : int2(0, 1);
+	const int2 AxisStep = GetAxisStep(Axis);
 
 	FThinOutlineRecord Pooled = GetEmptyRecord();
-	PoolRecord(Pooled, LoadRecord(Axis, ViewportPos - AxisStep), 1.0);
+	PoolRecord(Pooled, LoadRecord(EdgeType, Axis, ViewportPos - AxisStep), 1.0);
 	PoolRecord(Pooled, OwnRecord, 0.0);
-	PoolRecord(Pooled, LoadRecord(Axis, ViewportPos + AxisStep), -1.0);
+	PoolRecord(Pooled, LoadRecord(EdgeType, Axis, ViewportPos + AxisStep), -1.0);
 	return Pooled;
 }
 
@@ -88,22 +137,60 @@ struct FThinOutlineCandidate
 	bool bValid;
 	FThinOutlineEdgeFit Fit;
 	float Strength;
+	// The outline band, as signed distances from the edge line, positive toward +u.
+	float BandMin;
+	float BandMax;
+	// Silhouettes: the background, and so the band, is on the +u side of the edge.
+	bool bBackgroundAlongU;
 };
 
-FThinOutlineCandidate GetCandidate(uint Axis, int2 ViewportPos)
+FThinOutlineCandidate GetCandidate(uint EdgeType, uint Axis, int2 ViewportPos)
 {
-	const FThinOutlineRecord OwnRecord = LoadRecord(Axis, ViewportPos);
-	const FThinOutlineRecord Record = GetFitRecord(Axis, ViewportPos, OwnRecord);
+	const FThinOutlineRecord OwnRecord = LoadRecord(EdgeType, Axis, ViewportPos);
+	const FThinOutlineRecord Record = GetFitRecord(EdgeType, Axis, ViewportPos, OwnRecord);
 
 	FThinOutlineCandidate Candidate;
 	Candidate.Fit = FitEdge(Record, DistinctSampleScale);
 	Candidate.Strength = Record.Strength;
+	Candidate.bBackgroundAlongU = false;
+
+	if (EdgeType == EDGE_CREASE)
+	{
+		Candidate.BandMin = -0.5 * CreaseThickness;
+		Candidate.BandMax = 0.5 * CreaseThickness;
+	}
+	else
+	{
+		// Samples of the left (top) check come from background pixels whose foreground is on the left (top).
+		Candidate.bBackgroundAlongU = Record.KeptRatio >= 0.5;
+		Candidate.BandMin = Candidate.bBackgroundAlongU ? 0.0 : -SilhouetteThickness;
+		Candidate.BandMax = Candidate.bBackgroundAlongU ? SilhouetteThickness : 0.0;
+	}
+
 	// A pixel whose own record mixes in a second edge has no edge on this axis: between two close edges, the pooled
-	// neighbours would put a line in the gap. The pixel only draws the part of the outline band that crosses it.
+	// neighbours would put a line in the gap. A pixel that never sampled a silhouette itself is its foreground: its
+	// pooled neighbours describe the contour, but painting it would eat into the foreground's shape.
+	// The pixel only draws the part of the outline band that crosses it.
 	Candidate.bValid = Candidate.Fit.bValid
 		&& OwnRecord.CoTriggerRatio <= CoTriggerThreshold
-		&& GetBandArea(Candidate.Fit.Intercept, Candidate.Fit.Slope, HalfThickness, float2(0.0, 0.0), float2(1.0, 1.0)) > 0.0;
+		&& (EdgeType == EDGE_CREASE || OwnRecord.SampleCount > 0.0)
+		&& GetBandArea(Candidate.Fit.Intercept, Candidate.Fit.Slope, Candidate.BandMin, Candidate.BandMax, float2(0.0, 0.0), float2(1.0, 1.0)) > THIN_OUTLINE_MIN_BAND_AREA;
 	return Candidate;
+}
+
+// Of the two axes' candidates (at least one valid), whether the vertical one is drawn.
+bool SelectVertical(FThinOutlineCandidate Horizontal, FThinOutlineCandidate Vertical)
+{
+	if (Horizontal.bValid != Vertical.bValid)
+	{
+		return Vertical.bValid;
+	}
+	if (abs(Horizontal.Fit.SlopeStandardError - Vertical.Fit.SlopeStandardError) > SlopeStandardErrorThreshold)
+	{
+		return Vertical.Fit.SlopeStandardError < Horizontal.Fit.SlopeStandardError;
+	}
+	// Each slope is measured against its own inducer axis, so the smaller one crosses its axis more squarely.
+	return abs(Vertical.Fit.Slope) < abs(Horizontal.Fit.Slope);
 }
 
 // Drawn with FScreenPassVS (AddDrawScreenPass): the inputs must match its outputs in order, even when unused,
@@ -117,62 +204,28 @@ void MainPS(
 	const uint2 OutputViewportPos = uint2(SvPosition.xy) - Output_ViewportMin;
 	const float4 SceneColor = InputSceneColorTexture.Load(int3(Input_ViewportMin + OutputViewportPos, 0));
 	const int2 ViewportPos = int2(OutputViewportPos);
+	const int2 PixelPos = int2(View.ViewRectMin.xy) + ViewportPos;
+
+	FThinOutlineCandidate Horizontal = GetCandidate(EDGE_SILHOUETTE, AXIS_HORIZONTAL, ViewportPos);
+	FThinOutlineCandidate Vertical = GetCandidate(EDGE_SILHOUETTE, AXIS_VERTICAL, ViewportPos);
+	bool bSilhouette = true;
 
 	BRANCH
-	if (DebugView == 1)
+	if (!Horizontal.bValid && !Vertical.bValid)
 	{
-		FThinOutlineSample Center;
-		FThinOutlineSample Neighbours[4];
-		LoadOutlineNeighbourhood(int2(View.ViewRectMin.xy) + ViewportPos, Center, Neighbours);
-		const FThinOutlineEdges Edges = DetectEdges(Center, Neighbours);
-
-		float Ridge = 0.0;
-		float Valley = 0.0;
-		UNROLL
-		for (uint Index = 0; Index < 4; ++Index)
-		{
-			Ridge = max(Ridge, Edges.bRidge[Index] ? Edges.Crease[Index] : 0.0);
-			Valley = max(Valley, Edges.bRidge[Index] ? 0.0 : Edges.Crease[Index]);
-		}
-
-		OutColor = float4(Edges.Silhouette, Ridge, Valley, SceneColor.a);
-		return;
+		Horizontal = GetCandidate(EDGE_CREASE, AXIS_HORIZONTAL, ViewportPos);
+		Vertical = GetCandidate(EDGE_CREASE, AXIS_VERTICAL, ViewportPos);
+		bSilhouette = false;
 	}
-
-	BRANCH
-	if (DebugView == 2)
-	{
-		const FThinOutlineRecord HorizontalRecord = LoadRecord(AXIS_HORIZONTAL, ViewportPos);
-		const FThinOutlineRecord VerticalRecord = LoadRecord(AXIS_VERTICAL, ViewportPos);
-		OutColor = float4(
-			saturate(HorizontalRecord.SampleCount / SaturatedSampleCount),
-			saturate(VerticalRecord.SampleCount / SaturatedSampleCount),
-			max(HorizontalRecord.CoTriggerRatio, VerticalRecord.CoTriggerRatio),
-			SceneColor.a);
-		return;
-	}
-
-	const FThinOutlineCandidate Horizontal = GetCandidate(AXIS_HORIZONTAL, ViewportPos);
-	const FThinOutlineCandidate Vertical = GetCandidate(AXIS_VERTICAL, ViewportPos);
 
 	float Alpha = 0.0;
 	bool bVertical = false;
+	float ForegroundDeviceZ = 0.0;
+	float4 ForegroundVelocity = 0.0;
 
 	if (Horizontal.bValid || Vertical.bValid)
 	{
-		if (Horizontal.bValid != Vertical.bValid)
-		{
-			bVertical = Vertical.bValid;
-		}
-		else if (abs(Horizontal.Fit.SlopeStandardError - Vertical.Fit.SlopeStandardError) > SlopeStandardErrorThreshold)
-		{
-			bVertical = Vertical.Fit.SlopeStandardError < Horizontal.Fit.SlopeStandardError;
-		}
-		else
-		{
-			// Each slope is measured against its own inducer axis, so the smaller one crosses its axis more squarely.
-			bVertical = abs(Vertical.Fit.Slope) < abs(Horizontal.Fit.Slope);
-		}
+		bVertical = SelectVertical(Horizontal, Vertical);
 
 		FThinOutlineCandidate Selected = Horizontal;
 		if (bVertical)
@@ -190,18 +243,97 @@ void MainPS(
 
 		// Coverage is computed in the (u, v) coordinates of the selected edge's axis.
 		const float BandArea = bVertical
-			? GetBandArea(Selected.Fit.Intercept, Selected.Fit.Slope, HalfThickness, RectMin.yx, RectMax.yx)
-			: GetBandArea(Selected.Fit.Intercept, Selected.Fit.Slope, HalfThickness, RectMin, RectMax);
+			? GetBandArea(Selected.Fit.Intercept, Selected.Fit.Slope, Selected.BandMin, Selected.BandMax, RectMin.yx, RectMax.yx)
+			: GetBandArea(Selected.Fit.Intercept, Selected.Fit.Slope, Selected.BandMin, Selected.BandMax, RectMin, RectMax);
 
 		const float Coverage = RectArea > 0.0 ? saturate(BandArea / RectArea) : 0.0;
 		Alpha = Coverage * saturate(Selected.Strength);
+
+		if (bSilhouette && Alpha > 0.0)
+		{
+			// The foreground is the nearest pixel within two pixels on the foreground side, the pixel itself included:
+			// one pixel outside the contour, the axial neighbour may sample the background this frame.
+			const int2 AxisStep = GetAxisStep(bVertical ? AXIS_VERTICAL : AXIS_HORIZONTAL);
+			const int2 ForegroundStep = Selected.bBackgroundAlongU ? -AxisStep : AxisStep;
+			const float OwnDeviceZ = LoadDeviceZ(PixelPos);
+
+			int2 ForegroundPos = PixelPos;
+			float NearestDeviceZ = OwnDeviceZ;
+			UNROLL
+			for (int Distance = 1; Distance <= 2; ++Distance)
+			{
+				const int2 CandidatePos = ClampToViewRect(PixelPos + Distance * ForegroundStep);
+				const float CandidateDeviceZ = LoadDeviceZ(CandidatePos);
+				if (CandidateDeviceZ > NearestDeviceZ)
+				{
+					ForegroundPos = CandidatePos;
+					NearestDeviceZ = CandidateDeviceZ;
+				}
+			}
+
+			// Only across an actual depth discontinuity; a pixel that samples the foreground itself keeps its own values.
+			const bool bOwnSky = IsSkyDeviceZ(OwnDeviceZ);
+			const float OwnDepth = DeviceZToDepth(OwnDeviceZ);
+			const float NearestDepth = DeviceZToDepth(NearestDeviceZ);
+			if (any(ForegroundPos != PixelPos) && (bOwnSky || (OwnDepth - NearestDepth) / max(OwnDepth, 1.0) > SilhouetteThreshold))
+			{
+				ForegroundDeviceZ = NearestDeviceZ;
+				ForegroundVelocity = SceneTexturesStruct.GBufferVelocityTexture.Load(int3(ForegroundPos, 0));
+			}
+		}
 	}
 
-	if (DebugView == 3)
+	RWForegroundDeviceZ[ViewportPos] = ForegroundDeviceZ;
+	RWForegroundVelocity[ViewportPos] = ForegroundVelocity;
+
+	BRANCH
+	if (DebugView == 1)
 	{
-		OutColor = float4(bVertical ? 0.0 : Alpha, bVertical ? Alpha : 0.0, 0.0, SceneColor.a);
-		return;
-	}
+		FThinOutlineSample Center;
+		FThinOutlineSample Neighbours[4];
+		LoadOutlineNeighbourhood(PixelPos, Center, Neighbours);
+		float FarDeviceZ[4];
+		LoadFarDeviceZ(PixelPos, FarDeviceZ);
+		const FThinOutlineEdges Edges = DetectEdges(Center, Neighbours, FarDeviceZ);
 
-	OutColor = float4(lerp(SceneColor.rgb, OutlineColor, Alpha), SceneColor.a);
+		float Ridge = 0.0;
+		float Valley = 0.0;
+		UNROLL
+		for (uint Index = 0; Index < 4; ++Index)
+		{
+			Ridge = max(Ridge, Edges.bRidge[Index] ? Edges.Crease[Index] : 0.0);
+			Valley = max(Valley, Edges.bRidge[Index] ? 0.0 : Edges.Crease[Index]);
+		}
+
+		OutColor = float4(Edges.MaxSilhouette, Ridge, Valley, SceneColor.a);
+	}
+	else if (DebugView == 2 || DebugView == 4)
+	{
+		const uint EdgeType = DebugView == 2 ? EDGE_CREASE : EDGE_SILHOUETTE;
+		const FThinOutlineRecord HorizontalRecord = LoadRecord(EdgeType, AXIS_HORIZONTAL, ViewportPos);
+		const FThinOutlineRecord VerticalRecord = LoadRecord(EdgeType, AXIS_VERTICAL, ViewportPos);
+
+		// Creases: co-trigger ratio. Silhouettes: kept ratio of the record with more samples.
+		const float Blue = EdgeType == EDGE_CREASE
+			? max(HorizontalRecord.CoTriggerRatio, VerticalRecord.CoTriggerRatio)
+			: (HorizontalRecord.SampleCount >= VerticalRecord.SampleCount ? HorizontalRecord.KeptRatio : VerticalRecord.KeptRatio);
+
+		OutColor = float4(
+			saturate(HorizontalRecord.SampleCount / SaturatedSampleCount),
+			saturate(VerticalRecord.SampleCount / SaturatedSampleCount),
+			Blue,
+			SceneColor.a);
+	}
+	else if (DebugView == 3)
+	{
+		OutColor = float4(bVertical ? 0.0 : Alpha, bVertical ? Alpha : 0.0, bSilhouette ? Alpha : 0.0, SceneColor.a);
+	}
+	else if (DebugView == 5)
+	{
+		OutColor = float4(ForegroundDeviceZ > 0.0 ? 1.0 : 0.0, bSilhouette ? Alpha : 0.0, 0.0, SceneColor.a);
+	}
+	else
+	{
+		OutColor = float4(lerp(SceneColor.rgb, bSilhouette ? SilhouetteColor : CreaseColor, Alpha), SceneColor.a);
+	}
 }

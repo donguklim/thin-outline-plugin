@@ -12,9 +12,12 @@ struct FScreenPassTexture;
 /** Snapshot of the outline settings, gathered on the game thread once per view family. */
 struct FThinOutlineRenderSettings
 {
-	FLinearColor OutlineColor = FLinearColor::Black;
+	FLinearColor SilhouetteColor = FLinearColor::Black;
+	FLinearColor CreaseColor = FLinearColor::Black;
 	float SilhouetteThreshold = 0.0f;
 	float SilhouetteScale = 0.0f;
+	float SilhouetteThickness = 0.0f;
+	float SilhouetteHistoryViewAngle = 0.0f;
 	float CreaseRidgeThreshold = 0.0f;
 	float CreaseValleyThreshold = 0.0f;
 	float CreaseScale = 0.0f;
@@ -26,13 +29,31 @@ struct FThinOutlineRenderSettings
 	int32 DebugView = 0;
 };
 
+/** Textures of the edge records (see ThinOutlineCommon.ush and ThinOutlineRecord.usf). */
+namespace EThinOutlineHistoryTexture
+{
+	enum Type : int32
+	{
+		CreaseHorizontalA,
+		CreaseHorizontalB,
+		CreaseVerticalA,
+		CreaseVerticalB,
+		SilhouetteHorizontalA,
+		SilhouetteHorizontalB,
+		SilhouetteVerticalA,
+		SilhouetteVerticalB,
+		/** Kept ratio of the horizontal and vertical silhouette records. */
+		SilhouetteKept,
+		/** Linear depth of the pixel's surface and of its foreground when the records were written. */
+		Depth,
+		Num
+	};
+}
+
 /** Edge records of one view state, carried from frame to frame. */
 struct FThinOutlineHistory
 {
-	/** Horizontal A, horizontal B, vertical A, vertical B (see ThinOutlineCommon.ush). */
-	TRefCountPtr<IPooledRenderTarget> Records[4];
-	/** Linear depth of each pixel when its records were written. */
-	TRefCountPtr<IPooledRenderTarget> Depth;
+	TRefCountPtr<IPooledRenderTarget> Textures[EThinOutlineHistoryTexture::Num];
 	FIntPoint ViewSize = FIntPoint::ZeroValue;
 	/** FSceneViewState::GetFrameIndex() of the frame that wrote the records; they only reproject by one frame. */
 	uint32 ViewStateFrameIndex = 0;
@@ -40,9 +61,10 @@ struct FThinOutlineHistory
 };
 
 /**
- * Draws crease outlines into scene color at the BeforeDOF post-processing pass, i.e. at rendering resolution
- * before the temporal upscaler (TAA/TSR/third party) runs. The edges are reconstructed from per-pixel temporal
- * records of the jittered G-buffer edge checks.
+ * Draws silhouette and crease outlines into scene color at the BeforeDOF post-processing pass, i.e. at rendering
+ * resolution before the temporal upscaler (TAA/TSR/third party) runs. The edges are reconstructed from per-pixel
+ * temporal records of the jittered G-buffer edge checks. Pixels painted with a silhouette get the foreground's depth
+ * and velocity, so the upscaler moves the outline with the foreground.
  */
 class FThinOutlineSceneViewExtension : public FSceneViewExtensionBase
 {

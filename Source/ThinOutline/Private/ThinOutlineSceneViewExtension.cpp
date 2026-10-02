@@ -5,6 +5,7 @@
 #include "ThinOutlineSettings.h"
 #include "ThinOutlineShaders.h"
 
+#include "PixelShaderUtils.h"
 #include "PostProcess/PostProcessMaterialInputs.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphUtils.h"
@@ -19,6 +20,26 @@ namespace ThinOutline
 {
 	// Histories of view states that have not rendered for this many frames are released.
 	constexpr int64 HistoryLifetimeFrames = 300;
+
+	struct FHistoryTextureInfo
+	{
+		EPixelFormat Format;
+		const TCHAR* Name;
+	};
+
+	static const FHistoryTextureInfo HistoryTextureInfos[EThinOutlineHistoryTexture::Num] =
+	{
+		{ PF_FloatRGBA, TEXT("ThinOutline.CreaseHorizontalA") },
+		{ PF_FloatRGBA, TEXT("ThinOutline.CreaseHorizontalB") },
+		{ PF_FloatRGBA, TEXT("ThinOutline.CreaseVerticalA") },
+		{ PF_FloatRGBA, TEXT("ThinOutline.CreaseVerticalB") },
+		{ PF_FloatRGBA, TEXT("ThinOutline.SilhouetteHorizontalA") },
+		{ PF_FloatRGBA, TEXT("ThinOutline.SilhouetteHorizontalB") },
+		{ PF_FloatRGBA, TEXT("ThinOutline.SilhouetteVerticalA") },
+		{ PF_FloatRGBA, TEXT("ThinOutline.SilhouetteVerticalB") },
+		{ PF_G16R16F, TEXT("ThinOutline.SilhouetteKept") },
+		{ PF_G32R32F, TEXT("ThinOutline.RecordDepth") },
+	};
 }
 
 FThinOutlineSceneViewExtension::FThinOutlineSceneViewExtension(const FAutoRegister& AutoRegister)
@@ -34,9 +55,12 @@ bool FThinOutlineSceneViewExtension::IsActiveThisFrame_Internal(const FSceneView
 void FThinOutlineSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& InViewFamily)
 {
 	FThinOutlineRenderSettings Settings;
-	Settings.OutlineColor                    = GetDefault<UThinOutlineSettings>()->OutlineColor;
+	Settings.SilhouetteColor                 = GetDefault<UThinOutlineSettings>()->SilhouetteColor;
+	Settings.CreaseColor                     = GetDefault<UThinOutlineSettings>()->CreaseColor;
 	Settings.SilhouetteThreshold             = FMath::Max(0.0f, CVarThinOutlineSilhouetteThreshold.GetValueOnGameThread());
 	Settings.SilhouetteScale                 = FMath::Max(0.0f, CVarThinOutlineSilhouetteScale.GetValueOnGameThread());
+	Settings.SilhouetteThickness             = FMath::Max(0.0f, CVarThinOutlineSilhouetteThickness.GetValueOnGameThread());
+	Settings.SilhouetteHistoryViewAngle      = FMath::Clamp(CVarThinOutlineSilhouetteHistoryViewAngle.GetValueOnGameThread(), 0.0f, 180.0f);
 	Settings.CreaseRidgeThreshold            = FMath::Max(0.0f, CVarThinOutlineCreaseRidgeThreshold.GetValueOnGameThread());
 	Settings.CreaseValleyThreshold           = FMath::Max(0.0f, CVarThinOutlineCreaseValleyThreshold.GetValueOnGameThread());
 	Settings.CreaseScale                     = FMath::Max(0.0f, CVarThinOutlineCreaseScale.GetValueOnGameThread());
@@ -146,54 +170,56 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 	FThinOutlineHistory* History = FindOrAddHistory_RenderThread(View);
 	const uint32 ViewStateFrameIndex = ViewInfo.ViewState ? ViewInfo.ViewState->GetFrameIndex() : 0;
 	const bool bHistoryValid = History
-		&& History->Depth.IsValid()
+		&& History->Textures[EThinOutlineHistoryTexture::Depth].IsValid()
 		&& History->ViewSize == ViewSize
 		&& (ViewInfo.bStatePrevViewInfoIsReadOnly || ViewStateFrameIndex == History->ViewStateFrameIndex + 1)
 		&& !View.bCameraCut
 		&& !ViewInfo.bPrevTransformsReset;
 
+	using namespace EThinOutlineHistoryTexture;
+
 	// Edge record update.
-	const FRDGTextureDesc RecordDesc = FRDGTextureDesc::Create2D(ViewSize, PF_FloatRGBA, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_UAV);
-	const FRDGTextureDesc DepthDesc = FRDGTextureDesc::Create2D(ViewSize, PF_R32_FLOAT, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_UAV);
-
-	static const TCHAR* const RecordNames[4] =
+	FRDGTextureRef Records[Num];
+	FRDGTextureRef HistoryRecords[Num];
+	for (int32 Index = 0; Index < Num; ++Index)
 	{
-		TEXT("ThinOutline.HorizontalRecordA"),
-		TEXT("ThinOutline.HorizontalRecordB"),
-		TEXT("ThinOutline.VerticalRecordA"),
-		TEXT("ThinOutline.VerticalRecordB"),
-	};
-
-	FRDGTextureRef Records[4];
-	FRDGTextureRef HistoryRecords[4];
-	for (int32 Index = 0; Index < 4; ++Index)
-	{
-		Records[Index] = GraphBuilder.CreateTexture(RecordDesc, RecordNames[Index]);
-		HistoryRecords[Index] = bHistoryValid ? GraphBuilder.RegisterExternalTexture(History->Records[Index]) : GSystemTextures.GetBlackDummy(GraphBuilder);
+		const ThinOutline::FHistoryTextureInfo& Info = ThinOutline::HistoryTextureInfos[Index];
+		const FRDGTextureDesc Desc = FRDGTextureDesc::Create2D(ViewSize, Info.Format, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_UAV);
+		Records[Index] = GraphBuilder.CreateTexture(Desc, Info.Name);
+		HistoryRecords[Index] = bHistoryValid ? GraphBuilder.RegisterExternalTexture(History->Textures[Index]) : GSystemTextures.GetBlackDummy(GraphBuilder);
 	}
-	FRDGTextureRef Depth = GraphBuilder.CreateTexture(DepthDesc, TEXT("ThinOutline.RecordDepth"));
-	FRDGTextureRef HistoryDepth = bHistoryValid ? GraphBuilder.RegisterExternalTexture(History->Depth) : GSystemTextures.GetBlackDummy(GraphBuilder);
 
 	{
 		FThinOutlineRecordCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FThinOutlineRecordCS::FParameters>();
-		PassParameters->View                  = View.ViewUniformBuffer;
-		PassParameters->SceneTexturesStruct   = Inputs.SceneTextures.SceneTextures;
-		PassParameters->Substrate             = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
-		PassParameters->EdgeCheck             = EdgeCheck;
-		PassParameters->HistoryHorizontalA    = HistoryRecords[0];
-		PassParameters->HistoryHorizontalB    = HistoryRecords[1];
-		PassParameters->HistoryVerticalA      = HistoryRecords[2];
-		PassParameters->HistoryVerticalB      = HistoryRecords[3];
-		PassParameters->HistoryDepth          = HistoryDepth;
-		PassParameters->RWHorizontalA         = GraphBuilder.CreateUAV(Records[0]);
-		PassParameters->RWHorizontalB         = GraphBuilder.CreateUAV(Records[1]);
-		PassParameters->RWVerticalA           = GraphBuilder.CreateUAV(Records[2]);
-		PassParameters->RWVerticalB           = GraphBuilder.CreateUAV(Records[3]);
-		PassParameters->RWDepth               = GraphBuilder.CreateUAV(Depth);
-		PassParameters->SampleLocalPosition   = SampleLocalPosition;
-		PassParameters->SampleCountDecay      = 1.0f - Settings.EstimatorDecay;
-		PassParameters->HistoryDepthThreshold = Settings.HistoryDepthThreshold;
-		PassParameters->bHistoryValid         = bHistoryValid ? 1 : 0;
+		PassParameters->View                         = View.ViewUniformBuffer;
+		PassParameters->SceneTexturesStruct          = Inputs.SceneTextures.SceneTextures;
+		PassParameters->Substrate                    = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
+		PassParameters->EdgeCheck                    = EdgeCheck;
+		PassParameters->HistoryCreaseHorizontalA     = HistoryRecords[CreaseHorizontalA];
+		PassParameters->HistoryCreaseHorizontalB     = HistoryRecords[CreaseHorizontalB];
+		PassParameters->HistoryCreaseVerticalA       = HistoryRecords[CreaseVerticalA];
+		PassParameters->HistoryCreaseVerticalB       = HistoryRecords[CreaseVerticalB];
+		PassParameters->HistorySilhouetteHorizontalA = HistoryRecords[SilhouetteHorizontalA];
+		PassParameters->HistorySilhouetteHorizontalB = HistoryRecords[SilhouetteHorizontalB];
+		PassParameters->HistorySilhouetteVerticalA   = HistoryRecords[SilhouetteVerticalA];
+		PassParameters->HistorySilhouetteVerticalB   = HistoryRecords[SilhouetteVerticalB];
+		PassParameters->HistorySilhouetteKept        = HistoryRecords[SilhouetteKept];
+		PassParameters->HistoryDepth                 = HistoryRecords[Depth];
+		PassParameters->RWCreaseHorizontalA          = GraphBuilder.CreateUAV(Records[CreaseHorizontalA]);
+		PassParameters->RWCreaseHorizontalB          = GraphBuilder.CreateUAV(Records[CreaseHorizontalB]);
+		PassParameters->RWCreaseVerticalA            = GraphBuilder.CreateUAV(Records[CreaseVerticalA]);
+		PassParameters->RWCreaseVerticalB            = GraphBuilder.CreateUAV(Records[CreaseVerticalB]);
+		PassParameters->RWSilhouetteHorizontalA      = GraphBuilder.CreateUAV(Records[SilhouetteHorizontalA]);
+		PassParameters->RWSilhouetteHorizontalB      = GraphBuilder.CreateUAV(Records[SilhouetteHorizontalB]);
+		PassParameters->RWSilhouetteVerticalA        = GraphBuilder.CreateUAV(Records[SilhouetteVerticalA]);
+		PassParameters->RWSilhouetteVerticalB        = GraphBuilder.CreateUAV(Records[SilhouetteVerticalB]);
+		PassParameters->RWSilhouetteKept             = GraphBuilder.CreateUAV(Records[SilhouetteKept]);
+		PassParameters->RWDepth                      = GraphBuilder.CreateUAV(Records[Depth]);
+		PassParameters->SampleLocalPosition          = SampleLocalPosition;
+		PassParameters->SampleCountDecay             = 1.0f - Settings.EstimatorDecay;
+		PassParameters->HistoryDepthThreshold        = Settings.HistoryDepthThreshold;
+		PassParameters->SilhouetteHistoryCosAngle    = FMath::Cos(FMath::DegreesToRadians(Settings.SilhouetteHistoryViewAngle));
+		PassParameters->bHistoryValid                = bHistoryValid ? 1 : 0;
 
 		TShaderMapRef<FThinOutlineRecordCS> ComputeShader(GetGlobalShaderMap(View.GetFeatureLevel()));
 
@@ -208,11 +234,10 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 	// Views that must not advance the view state's temporal history only read it.
 	if (History && !ViewInfo.bStatePrevViewInfoIsReadOnly)
 	{
-		for (int32 Index = 0; Index < 4; ++Index)
+		for (int32 Index = 0; Index < Num; ++Index)
 		{
-			GraphBuilder.QueueTextureExtraction(Records[Index], &History->Records[Index]);
+			GraphBuilder.QueueTextureExtraction(Records[Index], &History->Textures[Index]);
 		}
-		GraphBuilder.QueueTextureExtraction(Depth, &History->Depth);
 		History->ViewSize = ViewSize;
 		History->ViewStateFrameIndex = ViewStateFrameIndex;
 	}
@@ -234,40 +259,103 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 	const FVector2f RenderPixelsPerDisplayPixel(
 		float(ViewSize.X) / float(FMath::Max(DisplaySize.X, 1)),
 		float(ViewSize.Y) / float(FMath::Max(DisplaySize.Y, 1)));
+	const float MeanRenderPixelsPerDisplayPixel = 0.5f * (RenderPixelsPerDisplayPixel.X + RenderPixelsPerDisplayPixel.Y);
 
-	FThinOutlinePS::FParameters* PassParameters = GraphBuilder.AllocParameters<FThinOutlinePS::FParameters>();
-	PassParameters->View                            = View.ViewUniformBuffer;
-	PassParameters->SceneTexturesStruct             = Inputs.SceneTextures.SceneTextures;
-	PassParameters->Substrate                       = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
-	PassParameters->EdgeCheck                       = EdgeCheck;
-	PassParameters->Input                           = GetScreenPassTextureViewportParameters(InputViewport);
-	PassParameters->Output                          = GetScreenPassTextureViewportParameters(OutputViewport);
-	PassParameters->InputSceneColorTexture          = SceneColor.Texture;
-	PassParameters->RecordHorizontalA               = Records[0];
-	PassParameters->RecordHorizontalB               = Records[1];
-	PassParameters->RecordVerticalA                 = Records[2];
-	PassParameters->RecordVerticalB                 = Records[3];
-	PassParameters->OutlineColor                    = FVector3f(Settings.OutlineColor.R, Settings.OutlineColor.G, Settings.OutlineColor.B);
-	PassParameters->SampleLocalPosition             = SampleLocalPosition;
-	PassParameters->RenderPixelsPerDisplayPixel     = RenderPixelsPerDisplayPixel;
-	PassParameters->HalfThickness                   = 0.25f * Settings.CreaseThickness * (RenderPixelsPerDisplayPixel.X + RenderPixelsPerDisplayPixel.Y);
-	PassParameters->CoTriggerThreshold              = Settings.CoTriggerThreshold;
-	PassParameters->SlopeStandardErrorThreshold     = Settings.SlopeStandardErrorThreshold;
-	PassParameters->DistinctSampleScale             = FMath::Min(1.0f, Settings.EstimatorDecay * float(FMath::Max(ViewInfo.TemporalJitterSequenceLength, 1)));
-	PassParameters->SaturatedSampleCount            = 1.0f / Settings.EstimatorDecay;
-	PassParameters->DebugView                       = static_cast<uint32>(FMath::Max(Settings.DebugView, 0));
-	PassParameters->RenderTargets[0]                = Output.GetRenderTargetBinding();
+	// Depth and encoded velocity of the foreground of the pixels painted with a silhouette.
+	const FRDGTextureDesc ForegroundDeviceZDesc = FRDGTextureDesc::Create2D(ViewSize, PF_R32_FLOAT, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_UAV);
+	const FRDGTextureDesc ForegroundVelocityDesc = FRDGTextureDesc::Create2D(ViewSize, PF_A32B32G32R32F, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_UAV);
+	FRDGTextureRef ForegroundDeviceZ = GraphBuilder.CreateTexture(ForegroundDeviceZDesc, TEXT("ThinOutline.ForegroundDeviceZ"));
+	FRDGTextureRef ForegroundVelocity = GraphBuilder.CreateTexture(ForegroundVelocityDesc, TEXT("ThinOutline.ForegroundVelocity"));
 
-	TShaderMapRef<FThinOutlinePS> PixelShader(GetGlobalShaderMap(View.GetFeatureLevel()));
+	{
+		FThinOutlinePS::FParameters* PassParameters = GraphBuilder.AllocParameters<FThinOutlinePS::FParameters>();
+		PassParameters->View                        = View.ViewUniformBuffer;
+		PassParameters->SceneTexturesStruct         = Inputs.SceneTextures.SceneTextures;
+		PassParameters->Substrate                   = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
+		PassParameters->EdgeCheck                   = EdgeCheck;
+		PassParameters->Input                       = GetScreenPassTextureViewportParameters(InputViewport);
+		PassParameters->Output                      = GetScreenPassTextureViewportParameters(OutputViewport);
+		PassParameters->InputSceneColorTexture      = SceneColor.Texture;
+		PassParameters->CreaseHorizontalA           = Records[CreaseHorizontalA];
+		PassParameters->CreaseHorizontalB           = Records[CreaseHorizontalB];
+		PassParameters->CreaseVerticalA             = Records[CreaseVerticalA];
+		PassParameters->CreaseVerticalB             = Records[CreaseVerticalB];
+		PassParameters->SilhouetteHorizontalA       = Records[SilhouetteHorizontalA];
+		PassParameters->SilhouetteHorizontalB       = Records[SilhouetteHorizontalB];
+		PassParameters->SilhouetteVerticalA         = Records[SilhouetteVerticalA];
+		PassParameters->SilhouetteVerticalB         = Records[SilhouetteVerticalB];
+		PassParameters->SilhouetteKept              = Records[SilhouetteKept];
+		PassParameters->RWForegroundDeviceZ         = GraphBuilder.CreateUAV(ForegroundDeviceZ);
+		PassParameters->RWForegroundVelocity        = GraphBuilder.CreateUAV(ForegroundVelocity);
+		PassParameters->CreaseColor                 = FVector3f(Settings.CreaseColor.R, Settings.CreaseColor.G, Settings.CreaseColor.B);
+		PassParameters->SilhouetteColor             = FVector3f(Settings.SilhouetteColor.R, Settings.SilhouetteColor.G, Settings.SilhouetteColor.B);
+		PassParameters->SampleLocalPosition         = SampleLocalPosition;
+		PassParameters->RenderPixelsPerDisplayPixel = RenderPixelsPerDisplayPixel;
+		PassParameters->CreaseThickness             = Settings.CreaseThickness * MeanRenderPixelsPerDisplayPixel;
+		PassParameters->SilhouetteThickness         = Settings.SilhouetteThickness * MeanRenderPixelsPerDisplayPixel;
+		PassParameters->CoTriggerThreshold          = Settings.CoTriggerThreshold;
+		PassParameters->SlopeStandardErrorThreshold = Settings.SlopeStandardErrorThreshold;
+		PassParameters->DistinctSampleScale         = FMath::Min(1.0f, Settings.EstimatorDecay * float(FMath::Max(ViewInfo.TemporalJitterSequenceLength, 1)));
+		PassParameters->SaturatedSampleCount        = 1.0f / Settings.EstimatorDecay;
+		PassParameters->DebugView                   = static_cast<uint32>(FMath::Max(Settings.DebugView, 0));
+		PassParameters->RenderTargets[0]            = Output.GetRenderTargetBinding();
 
-	AddDrawScreenPass(
-		GraphBuilder,
-		RDG_EVENT_NAME("ThinOutline.Composite"),
-		View,
-		OutputViewport,
-		InputViewport,
-		PixelShader,
-		PassParameters);
+		TShaderMapRef<FThinOutlinePS> PixelShader(GetGlobalShaderMap(View.GetFeatureLevel()));
+
+		AddDrawScreenPass(
+			GraphBuilder,
+			RDG_EVENT_NAME("ThinOutline.Composite"),
+			View,
+			OutputViewport,
+			InputViewport,
+			PixelShader,
+			PassParameters);
+	}
+
+	// The pixels painted with a silhouette take their foreground's depth and velocity, in the textures the temporal
+	// upscaler reads later (built-in and third party upscalers get the same ones), so it moves the outline with the
+	// foreground. Depth of field and motion blur see them too.
+	const FSceneTextureUniformParameters* SceneTextureParameters = Inputs.SceneTextures.SceneTextures->GetContents();
+	FRDGTextureRef SceneDepthTexture = SceneTextureParameters->SceneDepthTexture;
+	FRDGTextureRef SceneVelocityTexture = SceneTextureParameters->GBufferVelocityTexture;
+
+	if (SceneDepthTexture && EnumHasAnyFlags(SceneDepthTexture->Desc.Flags, TexCreate_DepthStencilTargetable))
+	{
+		// Without a velocity pass the velocity texture is a system dummy, and the upscaler derives the velocity of every
+		// pixel from its depth and the camera motion, which the overwritten depth already takes care of.
+		const bool bWriteVelocity = SceneVelocityTexture
+			&& EnumHasAnyFlags(SceneVelocityTexture->Desc.Flags, TexCreate_RenderTargetable)
+			&& SceneVelocityTexture->Desc.Extent == SceneDepthTexture->Desc.Extent;
+
+		FThinOutlineForegroundPS::FPermutationDomain PermutationVector;
+		PermutationVector.Set<FThinOutlineForegroundPS::FWriteVelocityDim>(bWriteVelocity);
+		TShaderMapRef<FThinOutlineForegroundPS> PixelShader(GetGlobalShaderMap(View.GetFeatureLevel()), PermutationVector);
+
+		FThinOutlineForegroundPS::FParameters* PassParameters = GraphBuilder.AllocParameters<FThinOutlineForegroundPS::FParameters>();
+		PassParameters->ForegroundDeviceZ  = ForegroundDeviceZ;
+		PassParameters->ForegroundVelocity = ForegroundVelocity;
+		PassParameters->ViewRectMin        = ViewInfo.ViewRect.Min;
+		PassParameters->RenderTargets.DepthStencil = FDepthStencilBinding(
+			SceneDepthTexture,
+			ERenderTargetLoadAction::ELoad,
+			SceneDepthTexture->Desc.Format == PF_DepthStencil ? ERenderTargetLoadAction::ELoad : ERenderTargetLoadAction::ENoAction,
+			FExclusiveDepthStencil::DepthWrite_StencilNop);
+		if (bWriteVelocity)
+		{
+			PassParameters->RenderTargets[0] = FRenderTargetBinding(SceneVelocityTexture, ERenderTargetLoadAction::ELoad);
+		}
+
+		FPixelShaderUtils::AddFullscreenPass(
+			GraphBuilder,
+			GetGlobalShaderMap(View.GetFeatureLevel()),
+			RDG_EVENT_NAME("ThinOutline.ForegroundDepthVelocity"),
+			PixelShader,
+			PassParameters,
+			ViewInfo.ViewRect,
+			nullptr,
+			nullptr,
+			TStaticDepthStencilState<true, CF_Always>::GetRHI());
+	}
 
 	return MoveTemp(Output);
 }
