@@ -27,8 +27,9 @@ TAutoConsoleVariable<int32> CVarThinOutlineDebugView(
 TAutoConsoleVariable<float> CVarThinOutlineSilhouetteThreshold(
 	TEXT("r.ThinOutline.Silhouette.Threshold"),
 	0.01f,
-	TEXT("Silhouette edge threshold. The edge measure is min(|second difference|, |first difference|) of linear depth,\n")
-	TEXT("divided by the target pixel's linear depth. Values at or below the threshold produce no silhouette.\n")
+	TEXT("Silhouette edge threshold. The edge measure is the distance of the neighbour's world position from the line through\n")
+	TEXT("the opposite neighbour's and the target pixel's, divided by the target pixel's linear depth. Values at or below the\n")
+	TEXT("threshold produce no silhouette, and count as one surface for creases and the history depth tests.\n")
 	TEXT("A pixel with a silhouette is not a crease candidate.\n"),
 	ECVF_Default
 );

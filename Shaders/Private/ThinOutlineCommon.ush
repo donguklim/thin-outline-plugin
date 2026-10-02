@@ -6,14 +6,15 @@
 	Edge checks, for a target pixel C, each axial neighbour N (left, right, top, bottom) and O, the pixel on the
 	opposite side of C:
 
-	Silhouette (linear depth, i.e. distance from the camera plane):
-		The gradient from O to C is added to C to get the expected depth at N, and the gradient from F (the pixel
-		beyond N) to N is added to N to get the expected depth at C.
-		Measure = min(|N - (C + (C - O))|, |C - (N + (N - F))|, |N - C|) / max(C, 1)
-		The second term keeps a surface seen at a grazing angle continuous next to a real silhouette, where O lies
-		across it and the first term cannot extrapolate.
+	Silhouette (world positions P of the pixels' samples, linear depth D, i.e. distance from the camera plane):
+		Measure = distance of P_N from the line through P_O and P_C / D_C
+		O, C and N lie on one screen axis, so on a plane they lie on one line in the world whatever the viewing angle: a
+		surface seen at a grazing angle needs a larger depth step than a facing one to count as a silhouette.
+		No measure (0) when O is sky (C is then the foreground of a silhouette toward O, which says nothing about N) or
+		when O is C itself (clamped at the view rect border).
 		Only counted on the background pixel (C farther than N), so a check fires toward the foreground.
 		A sky pixel (no depth) is a full silhouette toward every non-sky axial neighbour.
+		The same measure, with the silhouette threshold, decides everywhere else whether two pixels are on one surface.
 
 	Crease (world normals):
 		Measure = min(|cross(C, N) - cross(O, C)|, |cross(C, N)|)
@@ -88,32 +89,6 @@ float DeviceZToDepth(float DeviceZ)
 	return IsSkyDeviceZ(DeviceZ) ? THIN_OUTLINE_FAR_DEPTH : ConvertFromDeviceZ(DeviceZ);
 }
 
-FThinOutlineSample LoadOutlineSample(uint2 PixelPos)
-{
-	FThinOutlineSample Sample;
-
-	const float DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(PixelPos, 0)).r;
-	const bool bFarPlane = IsSkyDeviceZ(DeviceZ);
-
-	Sample.DeviceZ = DeviceZ;
-	Sample.bIsSky = bFarPlane;
-	Sample.Depth = DeviceZToDepth(DeviceZ);
-	Sample.TranslatedWorldPosition = bFarPlane ? float3(0, 0, 0) : SvPositionToTranslatedWorld(float4(float2(PixelPos) + 0.5, DeviceZ, 1.0));
-
-#if SUBSTRATE_GBUFFER_FORMAT == 1
-	const FSubstrateTopLayerData TopLayerData = SubstrateUnpackTopLayerData(Substrate.TopLayerTexture.Load(uint3(PixelPos, 0)));
-	Sample.WorldNormal = TopLayerData.WorldNormal;
-	Sample.bHasNormal = IsSubstrateMaterial(TopLayerData);
-#else
-	const FGBufferData GBuffer = GetGBufferDataUint(PixelPos);
-	Sample.WorldNormal = GBuffer.WorldNormal;
-	Sample.bHasNormal = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT;
-#endif
-
-	Sample.bHasNormal = Sample.bHasNormal && !bFarPlane && dot(Sample.WorldNormal, Sample.WorldNormal) > 0.25;
-	return Sample;
-}
-
 // Depth and G-buffer are addressed with the scene renderer's view rect.
 int2 ClampToViewRect(int2 PixelPos)
 {
@@ -122,47 +97,79 @@ int2 ClampToViewRect(int2 PixelPos)
 	return clamp(PixelPos, ViewRectMin, ViewRectMax);
 }
 
-// Loads the target pixel and its axial neighbours (clamped to the view rect) in NeighbourOffsets order.
-void LoadOutlineNeighbourhood(int2 PixelPos, out FThinOutlineSample Center, out FThinOutlineSample Neighbours[4])
-{
-	Center = LoadOutlineSample(uint2(PixelPos));
-
-	UNROLL
-	for (uint NeighbourIndex = 0; NeighbourIndex < 4; ++NeighbourIndex)
-	{
-		Neighbours[NeighbourIndex] = LoadOutlineSample(uint2(ClampToViewRect(PixelPos + NeighbourOffsets[NeighbourIndex])));
-	}
-}
-
 float LoadDeviceZ(int2 PixelPos)
 {
 	return SceneTexturesStruct.SceneDepthTexture.Load(int3(ClampToViewRect(PixelPos), 0)).r;
 }
 
-// Device Z of the pixels two steps away from the target (clamped to the view rect), in NeighbourOffsets order.
-void LoadFarDeviceZ(int2 PixelPos, out float FarDeviceZ[4])
+// Depth and world position of a pixel (clamped to the view rect), without its normal.
+FThinOutlineSample LoadDepthSample(int2 PixelPos)
 {
+	const int2 ClampedPos = ClampToViewRect(PixelPos);
+
+	FThinOutlineSample Sample;
+	Sample.DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(ClampedPos, 0)).r;
+	Sample.bIsSky = IsSkyDeviceZ(Sample.DeviceZ);
+	Sample.Depth = DeviceZToDepth(Sample.DeviceZ);
+	// The jittered SvPosition transform maps the pixel center back to the point the jittered projection sampled.
+	Sample.TranslatedWorldPosition = Sample.bIsSky ? float3(0, 0, 0) : SvPositionToTranslatedWorld(float4(float2(ClampedPos) + 0.5, Sample.DeviceZ, 1.0));
+	Sample.WorldNormal = float3(0, 0, 0);
+	Sample.bHasNormal = false;
+	return Sample;
+}
+
+// Depth, world position and normal of a pixel (clamped to the view rect).
+FThinOutlineSample LoadOutlineSample(int2 PixelPos)
+{
+	const int2 ClampedPos = ClampToViewRect(PixelPos);
+	FThinOutlineSample Sample = LoadDepthSample(ClampedPos);
+
+#if SUBSTRATE_GBUFFER_FORMAT == 1
+	const FSubstrateTopLayerData TopLayerData = SubstrateUnpackTopLayerData(Substrate.TopLayerTexture.Load(uint3(ClampedPos, 0)));
+	Sample.WorldNormal = TopLayerData.WorldNormal;
+	Sample.bHasNormal = IsSubstrateMaterial(TopLayerData);
+#else
+	const FGBufferData GBuffer = GetGBufferDataUint(uint2(ClampedPos));
+	Sample.WorldNormal = GBuffer.WorldNormal;
+	Sample.bHasNormal = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT;
+#endif
+
+	Sample.bHasNormal = Sample.bHasNormal && !Sample.bIsSky && dot(Sample.WorldNormal, Sample.WorldNormal) > 0.25;
+	return Sample;
+}
+
+// Loads the target pixel and its axial neighbours (clamped to the view rect) in NeighbourOffsets order.
+void LoadOutlineNeighbourhood(int2 PixelPos, out FThinOutlineSample Center, out FThinOutlineSample Neighbours[4])
+{
+	Center = LoadOutlineSample(PixelPos);
+
 	UNROLL
-	for (uint Index = 0; Index < 4; ++Index)
+	for (uint NeighbourIndex = 0; NeighbourIndex < 4; ++NeighbourIndex)
 	{
-		FarDeviceZ[Index] = LoadDeviceZ(PixelPos + 2 * NeighbourOffsets[Index]);
+		Neighbours[NeighbourIndex] = LoadOutlineSample(PixelPos + NeighbourOffsets[NeighbourIndex]);
 	}
 }
 
-// Depth discontinuity between the target C and the neighbour N, extrapolating the depth gradient from O through C.
-float GetDepthEdgeMeasure(float DepthC, float DepthN, float DepthO)
+// Depth discontinuity between the target C and its neighbour N, O being the pixel on the other side of C: the distance
+// of N from the line through O and C, relative to C's depth. Not defined for a sky C.
+float GetDepthEdgeMeasure(FThinOutlineSample C, FThinOutlineSample N, FThinOutlineSample O)
 {
-	const float ExpectedDepthN = DepthC + (DepthC - DepthO);
-	const float ExtrapolationError = abs(DepthN - ExpectedDepthN);
-	const float Difference = abs(DepthN - DepthC);
-	return min(ExtrapolationError, Difference) / max(DepthC, 1.0);
-}
+	if (N.bIsSky)
+	{
+		return THIN_OUTLINE_FAR_DEPTH;
+	}
 
-// Same, also extrapolating the depth gradient from F, the pixel beyond N, through N.
-float GetDepthEdgeMeasure(float DepthC, float DepthN, float DepthO, float DepthF)
-{
-	const float ExpectedDepthC = DepthN + (DepthN - DepthF);
-	return min(GetDepthEdgeMeasure(DepthC, DepthN, DepthO), abs(DepthC - ExpectedDepthC) / max(DepthC, 1.0));
+	// Without O there is no line: a sky O makes C the foreground of a silhouette toward O, which says nothing about N,
+	// and a clamped O at the view rect border is C itself.
+	const float3 LineDirection = C.TranslatedWorldPosition - O.TranslatedWorldPosition;
+	const float LineLengthSquared = dot(LineDirection, LineDirection);
+	if (O.bIsSky || LineLengthSquared <= 0.0)
+	{
+		return 0.0;
+	}
+
+	const float3 Offset = N.TranslatedWorldPosition - C.TranslatedWorldPosition;
+	return length(cross(Offset, LineDirection)) * rsqrt(LineLengthSquared) / C.Depth;
 }
 
 // Normal discontinuity between the target C and the neighbour N, extrapolating the normal rotation from O through C.
@@ -178,6 +185,21 @@ float GetEdgeStrength(float Measure, float Threshold, float Scale)
 	return Measure > Threshold ? saturate((Measure - Threshold) * Scale) : 0.0;
 }
 
+// Silhouette strength of the check of C toward N (O on the other side of C). Silhouettes belong to the background side
+// only: C must be farther than N. A sky pixel next to geometry is always a silhouette.
+float GetSilhouetteStrength(FThinOutlineSample C, FThinOutlineSample N, FThinOutlineSample O)
+{
+	if (C.bIsSky)
+	{
+		return N.bIsSky ? 0.0 : 1.0;
+	}
+	if (C.Depth > N.Depth)
+	{
+		return GetEdgeStrength(GetDepthEdgeMeasure(C, N, O), SilhouetteThreshold, SilhouetteScale);
+	}
+	return 0.0;
+}
+
 struct FThinOutlineEdges
 {
 	// Silhouette strength of each axial direction (NeighbourOffsets order); the neighbour is the foreground.
@@ -190,8 +212,7 @@ struct FThinOutlineEdges
 	bool bRidge[4];
 };
 
-// FarDeviceZ: see LoadFarDeviceZ.
-FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neighbours[4], float FarDeviceZ[4])
+FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neighbours[4])
 {
 	FThinOutlineEdges Edges;
 	Edges.MaxSilhouette = 0.0;
@@ -199,21 +220,7 @@ FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neig
 	UNROLL
 	for (uint Index = 0; Index < 4; ++Index)
 	{
-		const FThinOutlineSample Neighbour = Neighbours[Index];
-		Edges.Silhouette[Index] = 0.0;
-
-		if (Center.bIsSky)
-		{
-			// A sky pixel next to geometry is always a silhouette.
-			Edges.Silhouette[Index] = Neighbour.bIsSky ? 0.0 : 1.0;
-		}
-		else if (Center.Depth > Neighbour.Depth)
-		{
-			// Silhouettes belong to the background side only: the target must be farther than the neighbour.
-			const float DepthMeasure = GetDepthEdgeMeasure(Center.Depth, Neighbour.Depth, Neighbours[Index ^ 1].Depth, DeviceZToDepth(FarDeviceZ[Index]));
-			Edges.Silhouette[Index] = GetEdgeStrength(DepthMeasure, SilhouetteThreshold, SilhouetteScale);
-		}
-
+		Edges.Silhouette[Index] = GetSilhouetteStrength(Center, Neighbours[Index], Neighbours[Index ^ 1]);
 		Edges.MaxSilhouette = max(Edges.MaxSilhouette, Edges.Silhouette[Index]);
 	}
 
@@ -229,12 +236,11 @@ FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neig
 		// Silhouettes take priority: a pixel with a silhouette is not a crease candidate.
 		// Creases only exist between pixels of a depth-continuous surface. This also keeps the foreground side
 		// of a silhouette (which has no silhouette strength itself) free of creases.
-		const float DepthMeasure = GetDepthEdgeMeasure(Center.Depth, Neighbour.Depth, Opposite.Depth);
-		if (Edges.MaxSilhouette <= 0.0 && Center.bHasNormal && Neighbour.bHasNormal && DepthMeasure <= SilhouetteThreshold)
+		if (Edges.MaxSilhouette <= 0.0 && Center.bHasNormal && Neighbour.bHasNormal && GetDepthEdgeMeasure(Center, Neighbour, Opposite) <= SilhouetteThreshold)
 		{
 			// If the opposite pixel is not on the same surface, there is no normal rotation to extrapolate.
 			const bool bOppositeOnSurface = Opposite.bHasNormal
-				&& GetDepthEdgeMeasure(Center.Depth, Opposite.Depth, Neighbour.Depth) <= SilhouetteThreshold;
+				&& GetDepthEdgeMeasure(Center, Opposite, Neighbour) <= SilhouetteThreshold;
 			const float3 OppositeNormal = bOppositeOnSurface ? Opposite.WorldNormal : Center.WorldNormal;
 
 			const float CreaseMeasure = GetCreaseEdgeMeasure(Center.WorldNormal, Neighbour.WorldNormal, OppositeNormal);

@@ -34,8 +34,9 @@ public:
 
 	/**
 	 * Silhouette edges sit on depth discontinuities and are drawn on the background side only. A pixel with a silhouette is not a crease candidate.
-	 * Edge measure: min(|second difference|, |first difference|) of linear depth, divided by the target pixel's linear depth.
-	 * Measures at or below this threshold produce no silhouette.
+	 * Edge measure: distance of the neighbour's world position from the line through the opposite neighbour's and the target pixel's,
+	 * divided by the target pixel's linear depth. Measures at or below this threshold produce no silhouette, and count as one surface
+	 * for creases and the history depth tests.
 	 * Sky pixels (no depth) next to any geometry are always full silhouettes, regardless of this threshold.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.Threshold", ClampMin = "0.0", UIMax = "0.2"))

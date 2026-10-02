@@ -19,9 +19,9 @@
 	The outline alpha is the edge strength times the fraction of the display pixel (temporal upscaler output) under
 	this frame's sample, clipped to this rendering pixel, that the outline band covers.
 
-	A pixel painted with a silhouette shows the foreground's contour, so the depth and velocity of the nearest pixel on
-	the foreground side are written out for ThinOutlineForeground.usf, which copies them into the scene depth and
-	velocity: the temporal upscaler then moves the outline with the foreground.
+	A pixel painted with a silhouette shows the foreground's contour, so the depth and velocity of the foreground pixel
+	of the silhouette on the foreground side are written out for ThinOutlineForeground.usf, which copies them into the
+	scene depth and velocity: the temporal upscaler then moves the outline with the foreground.
 =============================================================================*/
 
 #include "ThinOutlineCommon.ush"
@@ -251,34 +251,28 @@ void MainPS(
 
 		if (bSilhouette && Alpha > 0.0)
 		{
-			// The foreground is the nearest pixel within two pixels on the foreground side, the pixel itself included:
-			// one pixel outside the contour, the axial neighbour may sample the background this frame.
+			// The foreground is the near side of the first silhouette, by the edge checks' own test, walking from the
+			// pixel up to two pixels toward the foreground: one pixel outside the contour, the axial neighbour may sample
+			// the background this frame. A pixel that samples the foreground itself finds none and keeps its own values.
 			const int2 AxisStep = GetAxisStep(bVertical ? AXIS_VERTICAL : AXIS_HORIZONTAL);
 			const int2 ForegroundStep = Selected.bBackgroundAlongU ? -AxisStep : AxisStep;
-			const float OwnDeviceZ = LoadDeviceZ(PixelPos);
 
-			int2 ForegroundPos = PixelPos;
-			float NearestDeviceZ = OwnDeviceZ;
+			FThinOutlineSample Previous = LoadDepthSample(PixelPos - ForegroundStep);
+			FThinOutlineSample Current = LoadDepthSample(PixelPos);
+			bool bFound = false;
 			UNROLL
 			for (int Distance = 1; Distance <= 2; ++Distance)
 			{
-				const int2 CandidatePos = ClampToViewRect(PixelPos + Distance * ForegroundStep);
-				const float CandidateDeviceZ = LoadDeviceZ(CandidatePos);
-				if (CandidateDeviceZ > NearestDeviceZ)
+				const int2 NextPos = ClampToViewRect(PixelPos + Distance * ForegroundStep);
+				const FThinOutlineSample Next = LoadDepthSample(NextPos);
+				if (!bFound && GetSilhouetteStrength(Current, Next, Previous) > 0.0)
 				{
-					ForegroundPos = CandidatePos;
-					NearestDeviceZ = CandidateDeviceZ;
+					bFound = true;
+					ForegroundDeviceZ = Next.DeviceZ;
+					ForegroundVelocity = SceneTexturesStruct.GBufferVelocityTexture.Load(int3(NextPos, 0));
 				}
-			}
-
-			// Only across an actual depth discontinuity; a pixel that samples the foreground itself keeps its own values.
-			const bool bOwnSky = IsSkyDeviceZ(OwnDeviceZ);
-			const float OwnDepth = DeviceZToDepth(OwnDeviceZ);
-			const float NearestDepth = DeviceZToDepth(NearestDeviceZ);
-			if (any(ForegroundPos != PixelPos) && (bOwnSky || (OwnDepth - NearestDepth) / max(OwnDepth, 1.0) > SilhouetteThreshold))
-			{
-				ForegroundDeviceZ = NearestDeviceZ;
-				ForegroundVelocity = SceneTexturesStruct.GBufferVelocityTexture.Load(int3(ForegroundPos, 0));
+				Previous = Current;
+				Current = Next;
 			}
 		}
 	}
@@ -292,9 +286,7 @@ void MainPS(
 		FThinOutlineSample Center;
 		FThinOutlineSample Neighbours[4];
 		LoadOutlineNeighbourhood(PixelPos, Center, Neighbours);
-		float FarDeviceZ[4];
-		LoadFarDeviceZ(PixelPos, FarDeviceZ);
-		const FThinOutlineEdges Edges = DetectEdges(Center, Neighbours, FarDeviceZ);
+		const FThinOutlineEdges Edges = DetectEdges(Center, Neighbours);
 
 		float Ridge = 0.0;
 		float Valley = 0.0;
