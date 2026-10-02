@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "ThinOutline",
+	"Description": "TAA-compatible subpixel outlines generated from G-buffer data.",
+	"Category": "Other",
+	"CreatedBy": "Donguk Lim",
+	"CreatedByURL": "https://donguklim.github.io/",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "ThinOutline",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}
