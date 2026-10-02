@@ -18,4 +18,9 @@ UThinOutlineSettings::UThinOutlineSettings(const FObjectInitializer& ObjectIniti
 	CreaseRidgeThreshold = 0.25f;
 	CreaseValleyThreshold = 0.25f;
 	CreaseScale = 4.0f;
+	CreaseThickness = 1.0f;
+	EstimatorDecay = 0.04f;
+	CoTriggerThreshold = 0.05f;
+	SlopeStandardErrorThreshold = 0.05f;
+	HistoryDepthThreshold = 0.02f;
 }

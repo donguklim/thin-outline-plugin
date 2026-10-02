@@ -2,6 +2,7 @@
 
 #include "ThinOutlineSubsystem.h"
 #include "ThinOutlineSceneViewExtension.h"
+#include "RenderingThread.h"
 #include "SceneViewExtension.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(ThinOutlineSubsystem)
@@ -25,6 +26,13 @@ void UThinOutlineSubsystem::Deinitialize()
 		};
 
 		ViewExtension->IsActiveThisFrameFunctions.Add(IsActiveFunctor);
+
+		// Pooled render targets are released on the render thread, after the frames in flight.
+		ENQUEUE_RENDER_COMMAND(ThinOutlineReleaseHistories)(
+			[ViewExtension = ViewExtension](FRHICommandListImmediate& RHICmdList)
+			{
+				ViewExtension->ReleaseHistories_RenderThread();
+			});
 	}
 
 	ViewExtension.Reset();

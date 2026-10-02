@@ -6,7 +6,7 @@
 
 extern TAutoConsoleVariable<int32> CVarThinOutlineEnable;
 
-// 0 = composite outline into scene color, 1 = show edge strengths (R = silhouette, G = ridge, B = valley)
+// 0 = composite the crease outline into scene color, 1..3 = debug views (see the CVar help)
 extern TAutoConsoleVariable<int32> CVarThinOutlineDebugView;
 
 // Silhouette (depth discontinuity)
@@ -17,3 +17,10 @@ extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteScale;
 extern TAutoConsoleVariable<float> CVarThinOutlineCreaseRidgeThreshold;
 extern TAutoConsoleVariable<float> CVarThinOutlineCreaseValleyThreshold;
 extern TAutoConsoleVariable<float> CVarThinOutlineCreaseScale;
+extern TAutoConsoleVariable<float> CVarThinOutlineCreaseThickness;
+
+// Temporal edge estimator (per-pixel OLS edge records)
+extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorDecay;
+extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorCoTriggerThreshold;
+extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorSlopeSEThreshold;
+extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorHistoryDepthThreshold;

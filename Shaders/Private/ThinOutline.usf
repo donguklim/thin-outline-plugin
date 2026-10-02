@@ -1,107 +1,109 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 /*=============================================================================
-	ThinOutline.usf: G-buffer outlines at rendering resolution.
+	ThinOutline.usf: draws the crease outline reconstructed from the edge records at rendering resolution.
 
-	For a target pixel C, each axial neighbour N (left, right, top, bottom) is tested
-	with O, the pixel on the opposite side of C:
+	Per axis, a pixel fits the pooled samples of its own record and its two neighbours' along the axis, weighted by
+	their sample counts. The neighbours' records are shifted into the pixel's coordinates by -0.5 (left/top neighbour)
+	and +0.5 (right/bottom neighbour). Around an edge all three describe the same line, so neighbouring pixels pool
+	nearly the same samples, and a pixel whose own history was just reset still gets its neighbours' data. Records
+	with a co-trigger ratio above the threshold mix in a second edge and are left out; a pixel whose own record is
+	above it has no edge on that axis.
 
-	Silhouette (linear depth, i.e. distance from the camera plane):
-		The gradient from O to C is added to C to get the expected depth at N.
-		Measure = min(|N - (C + (C - O))|, |N - C|) / max(C, 1)
-		Silhouettes are only drawn on the background pixel (C farther than N).
-		A sky pixel (no depth) with any non-sky axial neighbour is always a full silhouette.
+	Of the two axes' edges, only those whose outline band crosses this pixel are candidates. Of two candidates, the one
+	with the clearly smaller slope standard error wins, otherwise the one with the smaller absolute slope.
 
-	Crease (world normals):
-		Measure = min(|cross(C, N) - cross(O, C)|, |cross(C, N)|)
-		Ridges (convex) and valleys (concave) use separate thresholds.
-		Only evaluated when the pixel has no silhouette: silhouettes take priority.
-
-	Strength = Measure > Threshold ? saturate((Measure - Threshold) * Scale) : 0
-	The largest strength over the four directions is drawn.
+	The outline alpha is the edge strength times the fraction of the display pixel (temporal upscaler output) under
+	this frame's sample, clipped to this rendering pixel, that the outline band covers.
 =============================================================================*/
 
-#include "/Engine/Private/Common.ush"
+#include "ThinOutlineCommon.ush"
 #include "/Engine/Private/ScreenPass.ush"
-#include "/Engine/Private/DeferredShadingCommon.ush"
-#include "/Engine/Private/Substrate/Substrate.ush"
 
 SCREEN_PASS_TEXTURE_VIEWPORT(Input)
 SCREEN_PASS_TEXTURE_VIEWPORT(Output)
 
 Texture2D InputSceneColorTexture;
 
+Texture2D<float4> RecordHorizontalA;
+Texture2D<float4> RecordHorizontalB;
+Texture2D<float4> RecordVerticalA;
+Texture2D<float4> RecordVerticalB;
+
 float3 OutlineColor;
-float SilhouetteThreshold;
-float SilhouetteScale;
-float CreaseRidgeThreshold;
-float CreaseValleyThreshold;
-float CreaseScale;
+// This frame's G-buffer sample position inside its rendering pixel, in pixel-local coordinates [0, 1]^2.
+float2 SampleLocalPosition;
+float2 RenderPixelsPerDisplayPixel;
+// Half the outline thickness, in rendering pixels.
+float HalfThickness;
+float CoTriggerThreshold;
+float SlopeStandardErrorThreshold;
+// The jitter sequence repeats every L frames, so a record that gets a sample on a fraction f of the frames holds about
+// f * L distinct jitter positions, while its sample count is f / d: distinct = count * min(1, d * L).
+float DistinctSampleScale;
+// Sample count of a record that receives a sample every frame (1 / decay rate).
+float SaturatedSampleCount;
 uint DebugView;
 
-// Linear depth used for pixels on the far plane (sky), so they act as the farthest background.
-#define THIN_OUTLINE_FAR_DEPTH 1.0e20
+#define AXIS_HORIZONTAL 0
+#define AXIS_VERTICAL 1
 
-// Ordered so that (Index ^ 1) is the opposite neighbour: left, right, top, bottom.
-static const int2 NeighbourOffsets[4] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
-
-struct FThinOutlineSample
+FThinOutlineRecord LoadRecord(uint Axis, int2 ViewportPos)
 {
-	// Linear depth: distance from the camera plane.
-	float Depth;
-	float3 WorldNormal;
-	float3 TranslatedWorldPosition;
-	// Nothing was drawn: the depth buffer is still at the (infinite) far plane.
-	bool bIsSky;
-	// False for sky, unlit and other pixels without a G-buffer normal. Such pixels never get creases.
-	bool bHasNormal;
+	if (any(ViewportPos < 0) || any(ViewportPos >= int2(View.ViewSizeAndInvSize.xy)))
+	{
+		return GetEmptyRecord();
+	}
+
+	if (Axis == AXIS_HORIZONTAL)
+	{
+		return UnpackRecord(RecordHorizontalA.Load(int3(ViewportPos, 0)), RecordHorizontalB.Load(int3(ViewportPos, 0)));
+	}
+	return UnpackRecord(RecordVerticalA.Load(int3(ViewportPos, 0)), RecordVerticalB.Load(int3(ViewportPos, 0)));
+}
+
+// AlongOffset: this pixel's origin along the axis, in the record's coordinates.
+void PoolRecord(inout FThinOutlineRecord Pooled, FThinOutlineRecord Record, float AlongOffset)
+{
+	if (Record.SampleCount > 0.0 && Record.CoTriggerRatio <= CoTriggerThreshold)
+	{
+		ShiftRecord(Record, float2(AlongOffset, 0.0));
+		Pooled = MergeRecords(Pooled, Record);
+	}
+}
+
+FThinOutlineRecord GetFitRecord(uint Axis, int2 ViewportPos, FThinOutlineRecord OwnRecord)
+{
+	const int2 AxisStep = Axis == AXIS_HORIZONTAL ? int2(1, 0) : int2(0, 1);
+
+	FThinOutlineRecord Pooled = GetEmptyRecord();
+	PoolRecord(Pooled, LoadRecord(Axis, ViewportPos - AxisStep), 1.0);
+	PoolRecord(Pooled, OwnRecord, 0.0);
+	PoolRecord(Pooled, LoadRecord(Axis, ViewportPos + AxisStep), -1.0);
+	return Pooled;
+}
+
+struct FThinOutlineCandidate
+{
+	bool bValid;
+	FThinOutlineEdgeFit Fit;
+	float Strength;
 };
 
-FThinOutlineSample LoadOutlineSample(uint2 PixelPos)
+FThinOutlineCandidate GetCandidate(uint Axis, int2 ViewportPos)
 {
-	FThinOutlineSample Sample;
+	const FThinOutlineRecord OwnRecord = LoadRecord(Axis, ViewportPos);
+	const FThinOutlineRecord Record = GetFitRecord(Axis, ViewportPos, OwnRecord);
 
-	const float DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(PixelPos, 0)).r;
-	const bool bFarPlane = DeviceZ <= 1e-7;
-
-	Sample.bIsSky = bFarPlane;
-	Sample.Depth = bFarPlane ? THIN_OUTLINE_FAR_DEPTH : ConvertFromDeviceZ(DeviceZ);
-	Sample.TranslatedWorldPosition = bFarPlane ? float3(0, 0, 0) : SvPositionToTranslatedWorld(float4(float2(PixelPos) + 0.5, DeviceZ, 1.0));
-
-#if SUBSTRATE_GBUFFER_FORMAT == 1
-	const FSubstrateTopLayerData TopLayerData = SubstrateUnpackTopLayerData(Substrate.TopLayerTexture.Load(uint3(PixelPos, 0)));
-	Sample.WorldNormal = TopLayerData.WorldNormal;
-	Sample.bHasNormal = IsSubstrateMaterial(TopLayerData);
-#else
-	const FGBufferData GBuffer = GetGBufferDataUint(PixelPos);
-	Sample.WorldNormal = GBuffer.WorldNormal;
-	Sample.bHasNormal = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT;
-#endif
-
-	Sample.bHasNormal = Sample.bHasNormal && !bFarPlane && dot(Sample.WorldNormal, Sample.WorldNormal) > 0.25;
-	return Sample;
-}
-
-// Depth discontinuity between the target C and the neighbour N, extrapolating the depth gradient from O through C.
-float GetDepthEdgeMeasure(float DepthC, float DepthN, float DepthO)
-{
-	const float ExpectedDepthN = DepthC + (DepthC - DepthO);
-	const float ExtrapolationError = abs(DepthN - ExpectedDepthN);
-	const float Difference = abs(DepthN - DepthC);
-	return min(ExtrapolationError, Difference) / max(DepthC, 1.0);
-}
-
-// Normal discontinuity between the target C and the neighbour N, extrapolating the normal rotation from O through C.
-float GetCreaseEdgeMeasure(float3 NormalC, float3 NormalN, float3 NormalO)
-{
-	const float3 CrossOC = cross(NormalO, NormalC);
-	const float3 CrossCN = cross(NormalC, NormalN);
-	return min(length(CrossCN - CrossOC), length(CrossCN));
-}
-
-float GetEdgeStrength(float Measure, float Threshold, float Scale)
-{
-	return Measure > Threshold ? saturate((Measure - Threshold) * Scale) : 0.0;
+	FThinOutlineCandidate Candidate;
+	Candidate.Fit = FitEdge(Record, DistinctSampleScale);
+	Candidate.Strength = Record.Strength;
+	// A pixel whose own record mixes in a second edge has no edge on this axis: between two close edges, the pooled
+	// neighbours would put a line in the gap. The pixel only draws the part of the outline band that crosses it.
+	Candidate.bValid = Candidate.Fit.bValid
+		&& OwnRecord.CoTriggerRatio <= CoTriggerThreshold
+		&& GetBandArea(Candidate.Fit.Intercept, Candidate.Fit.Slope, HalfThickness, float2(0.0, 0.0), float2(1.0, 1.0)) > 0.0;
+	return Candidate;
 }
 
 // Drawn with FScreenPassVS (AddDrawScreenPass): the inputs must match its outputs in order, even when unused,
@@ -112,97 +114,94 @@ void MainPS(
 	float4 SvPosition : SV_POSITION,
 	out float4 OutColor : SV_Target0)
 {
-	const uint2 ViewportPos = uint2(SvPosition.xy) - Output_ViewportMin;
-	const float4 SceneColor = InputSceneColorTexture.Load(int3(Input_ViewportMin + ViewportPos, 0));
+	const uint2 OutputViewportPos = uint2(SvPosition.xy) - Output_ViewportMin;
+	const float4 SceneColor = InputSceneColorTexture.Load(int3(Input_ViewportMin + OutputViewportPos, 0));
+	const int2 ViewportPos = int2(OutputViewportPos);
 
-	// Depth and G-buffer are addressed with the scene renderer's view rect.
-	const int2 ViewRectMin = int2(View.ViewRectMin.xy);
-	const int2 ViewRectMax = ViewRectMin + int2(View.ViewSizeAndInvSize.xy) - 1;
-	const int2 PixelPos = ViewRectMin + int2(ViewportPos);
-
-	const FThinOutlineSample Center = LoadOutlineSample(uint2(PixelPos));
-
-	FThinOutlineSample Neighbours[4];
-	UNROLL
-	for (uint NeighbourIndex = 0; NeighbourIndex < 4; ++NeighbourIndex)
+	BRANCH
+	if (DebugView == 1)
 	{
-		Neighbours[NeighbourIndex] = LoadOutlineSample(uint2(clamp(PixelPos + NeighbourOffsets[NeighbourIndex], ViewRectMin, ViewRectMax)));
-	}
+		FThinOutlineSample Center;
+		FThinOutlineSample Neighbours[4];
+		LoadOutlineNeighbourhood(int2(View.ViewRectMin.xy) + ViewportPos, Center, Neighbours);
+		const FThinOutlineEdges Edges = DetectEdges(Center, Neighbours);
 
-	float Silhouette = 0.0;
-	float Ridge = 0.0;
-	float Valley = 0.0;
-
-	if (Center.bIsSky)
-	{
-		// A sky pixel next to any geometry is always a silhouette.
+		float Ridge = 0.0;
+		float Valley = 0.0;
 		UNROLL
 		for (uint Index = 0; Index < 4; ++Index)
 		{
-			if (!Neighbours[Index].bIsSky)
-			{
-				Silhouette = 1.0;
-			}
+			Ridge = max(Ridge, Edges.bRidge[Index] ? Edges.Crease[Index] : 0.0);
+			Valley = max(Valley, Edges.bRidge[Index] ? 0.0 : Edges.Crease[Index]);
 		}
-	}
-	else
-	{
-		UNROLL
-		for (uint Index = 0; Index < 4; ++Index)
-		{
-			const FThinOutlineSample Neighbour = Neighbours[Index];
 
-			// Silhouettes are drawn on the background side only: the target must be farther than the neighbour.
-			if (Center.Depth > Neighbour.Depth)
-			{
-				const float DepthMeasure = GetDepthEdgeMeasure(Center.Depth, Neighbour.Depth, Neighbours[Index ^ 1].Depth);
-				Silhouette = max(Silhouette, GetEdgeStrength(DepthMeasure, SilhouetteThreshold, SilhouetteScale));
-			}
-		}
-	}
-
-	// Silhouettes take priority: creases are only evaluated for pixels without any silhouette.
-	if (Silhouette <= 0.0)
-	{
-		UNROLL
-		for (uint Index = 0; Index < 4; ++Index)
-		{
-			const FThinOutlineSample Neighbour = Neighbours[Index];
-			const FThinOutlineSample Opposite = Neighbours[Index ^ 1];
-
-			// Creases only exist between pixels of a depth-continuous surface. This also keeps the foreground side
-			// of a silhouette (which has no silhouette strength itself) free of creases.
-			const float DepthMeasure = GetDepthEdgeMeasure(Center.Depth, Neighbour.Depth, Opposite.Depth);
-			if (Center.bHasNormal && Neighbour.bHasNormal && DepthMeasure <= SilhouetteThreshold)
-			{
-				// If the opposite pixel is not on the same surface, there is no normal rotation to extrapolate.
-				const bool bOppositeOnSurface = Opposite.bHasNormal
-					&& GetDepthEdgeMeasure(Center.Depth, Opposite.Depth, Neighbour.Depth) <= SilhouetteThreshold;
-				const float3 OppositeNormal = bOppositeOnSurface ? Opposite.WorldNormal : Center.WorldNormal;
-
-				const float CreaseMeasure = GetCreaseEdgeMeasure(Center.WorldNormal, Neighbour.WorldNormal, OppositeNormal);
-
-				// Convex when the normals diverge along the direction from the target to the neighbour.
-				const float3 NormalChange = Neighbour.WorldNormal - Center.WorldNormal;
-				const float3 PositionChange = Neighbour.TranslatedWorldPosition - Center.TranslatedWorldPosition;
-				if (dot(NormalChange, PositionChange) > 0.0)
-				{
-					Ridge = max(Ridge, GetEdgeStrength(CreaseMeasure, CreaseRidgeThreshold, CreaseScale));
-				}
-				else
-				{
-					Valley = max(Valley, GetEdgeStrength(CreaseMeasure, CreaseValleyThreshold, CreaseScale));
-				}
-			}
-		}
-	}
-
-	if (DebugView != 0)
-	{
-		OutColor = float4(Silhouette, Ridge, Valley, SceneColor.a);
+		OutColor = float4(Edges.Silhouette, Ridge, Valley, SceneColor.a);
 		return;
 	}
 
-	const float Outline = max(Silhouette, max(Ridge, Valley));
-	OutColor = float4(lerp(SceneColor.rgb, OutlineColor, Outline), SceneColor.a);
+	BRANCH
+	if (DebugView == 2)
+	{
+		const FThinOutlineRecord HorizontalRecord = LoadRecord(AXIS_HORIZONTAL, ViewportPos);
+		const FThinOutlineRecord VerticalRecord = LoadRecord(AXIS_VERTICAL, ViewportPos);
+		OutColor = float4(
+			saturate(HorizontalRecord.SampleCount / SaturatedSampleCount),
+			saturate(VerticalRecord.SampleCount / SaturatedSampleCount),
+			max(HorizontalRecord.CoTriggerRatio, VerticalRecord.CoTriggerRatio),
+			SceneColor.a);
+		return;
+	}
+
+	const FThinOutlineCandidate Horizontal = GetCandidate(AXIS_HORIZONTAL, ViewportPos);
+	const FThinOutlineCandidate Vertical = GetCandidate(AXIS_VERTICAL, ViewportPos);
+
+	float Alpha = 0.0;
+	bool bVertical = false;
+
+	if (Horizontal.bValid || Vertical.bValid)
+	{
+		if (Horizontal.bValid != Vertical.bValid)
+		{
+			bVertical = Vertical.bValid;
+		}
+		else if (abs(Horizontal.Fit.SlopeStandardError - Vertical.Fit.SlopeStandardError) > SlopeStandardErrorThreshold)
+		{
+			bVertical = Vertical.Fit.SlopeStandardError < Horizontal.Fit.SlopeStandardError;
+		}
+		else
+		{
+			// Each slope is measured against its own inducer axis, so the smaller one crosses its axis more squarely.
+			bVertical = abs(Vertical.Fit.Slope) < abs(Horizontal.Fit.Slope);
+		}
+
+		FThinOutlineCandidate Selected = Horizontal;
+		if (bVertical)
+		{
+			Selected = Vertical;
+		}
+
+		// The display pixel under this frame's sample, clipped to this rendering pixel, in pixel-local coordinates.
+		// Every sample landing in it reports the same coverage.
+		const float2 SamplePosition = float2(ViewportPos) + min(SampleLocalPosition, 0.9999);
+		const float2 DisplayPixel = floor(SamplePosition / RenderPixelsPerDisplayPixel);
+		const float2 RectMin = max(DisplayPixel * RenderPixelsPerDisplayPixel - float2(ViewportPos), 0.0);
+		const float2 RectMax = min((DisplayPixel + 1.0) * RenderPixelsPerDisplayPixel - float2(ViewportPos), 1.0);
+		const float RectArea = (RectMax.x - RectMin.x) * (RectMax.y - RectMin.y);
+
+		// Coverage is computed in the (u, v) coordinates of the selected edge's axis.
+		const float BandArea = bVertical
+			? GetBandArea(Selected.Fit.Intercept, Selected.Fit.Slope, HalfThickness, RectMin.yx, RectMax.yx)
+			: GetBandArea(Selected.Fit.Intercept, Selected.Fit.Slope, HalfThickness, RectMin, RectMax);
+
+		const float Coverage = RectArea > 0.0 ? saturate(BandArea / RectArea) : 0.0;
+		Alpha = Coverage * saturate(Selected.Strength);
+	}
+
+	if (DebugView == 3)
+	{
+		OutColor = float4(bVertical ? 0.0 : Alpha, bVertical ? Alpha : 0.0, 0.0, SceneColor.a);
+		return;
+	}
+
+	OutColor = float4(lerp(SceneColor.rgb, OutlineColor, Alpha), SceneColor.a);
 }

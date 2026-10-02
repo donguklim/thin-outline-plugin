@@ -1,0 +1,367 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+/*=============================================================================
+	ThinOutlineCommon.ush: G-buffer edge checks and the temporal OLS edge records shared by the ThinOutline passes.
+
+	Edge checks, for a target pixel C, each axial neighbour N (left, right, top, bottom) and O, the pixel on the
+	opposite side of C:
+
+	Silhouette (linear depth, i.e. distance from the camera plane):
+		The gradient from O to C is added to C to get the expected depth at N.
+		Measure = min(|N - (C + (C - O))|, |N - C|) / max(C, 1)
+		Only counted on the background pixel (C farther than N).
+		A sky pixel (no depth) with any non-sky axial neighbour is always a full silhouette.
+
+	Crease (world normals):
+		Measure = min(|cross(C, N) - cross(O, C)|, |cross(C, N)|)
+		Ridges (convex) and valleys (concave) use separate thresholds.
+		Only evaluated when the pixel has no silhouette.
+
+	Strength = Measure > Threshold ? saturate((Measure - Threshold) * Scale) : 0
+
+	Edge records, one per inducer axis (horizontal = left/right checks, vertical = top/bottom checks):
+	Every frame, a check that fires adds this frame's jittered sample position (u, v) to the record of its axis, in
+	pixel-local coordinates [0, 1]^2. u is the coordinate along the axis (x for horizontal), v the other one.
+	Samples of the left (top) check are added as they are, samples of the right (bottom) check are moved by +0.5
+	along u. For an edge u = E crossing the pixel, both land on the trapezoid midline u = 0.5 + E / 2, so ordinary
+	least squares u = a + b v of the record gives the edge E = 2a - 1 + 2b v.
+	The statistics are decayed running averages: every frame, the sample count n is multiplied by (1 - d), and a new
+	sample is averaged in with weight 1 / n, so samples are weighted by (1 - d)^age.
+=============================================================================*/
+
+#pragma once
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+#include "/Engine/Private/Substrate/Substrate.ush"
+
+float SilhouetteThreshold;
+float SilhouetteScale;
+float CreaseRidgeThreshold;
+float CreaseValleyThreshold;
+float CreaseScale;
+
+// Linear depth used for pixels on the far plane (sky), so they act as the farthest background.
+#define THIN_OUTLINE_FAR_DEPTH 1.0e20
+
+// Records with fewer (decayed) samples than this are cleared, so a record is either empty or holds real data.
+#define THIN_OUTLINE_EMPTY_SAMPLE_COUNT 0.1
+
+// OLS needs at least 3 samples for a standard error, and some spread across the axis.
+#define THIN_OUTLINE_MIN_FIT_SAMPLE_COUNT 3.0
+#define THIN_OUTLINE_MIN_FIT_VARIANCE 1.0e-4
+
+// Ordered so that (Index ^ 1) is the opposite neighbour: left, right, top, bottom.
+static const int2 NeighbourOffsets[4] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
+
+//------------------------------------------------------- EDGE CHECKS
+
+struct FThinOutlineSample
+{
+	float DeviceZ;
+	// Linear depth: distance from the camera plane.
+	float Depth;
+	float3 WorldNormal;
+	float3 TranslatedWorldPosition;
+	// Nothing was drawn: the depth buffer is still at the (infinite) far plane.
+	bool bIsSky;
+	// False for sky, unlit and other pixels without a G-buffer normal. Such pixels never get creases.
+	bool bHasNormal;
+};
+
+FThinOutlineSample LoadOutlineSample(uint2 PixelPos)
+{
+	FThinOutlineSample Sample;
+
+	const float DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(PixelPos, 0)).r;
+	const bool bFarPlane = DeviceZ <= 1e-7;
+
+	Sample.DeviceZ = DeviceZ;
+	Sample.bIsSky = bFarPlane;
+	Sample.Depth = bFarPlane ? THIN_OUTLINE_FAR_DEPTH : ConvertFromDeviceZ(DeviceZ);
+	Sample.TranslatedWorldPosition = bFarPlane ? float3(0, 0, 0) : SvPositionToTranslatedWorld(float4(float2(PixelPos) + 0.5, DeviceZ, 1.0));
+
+#if SUBSTRATE_GBUFFER_FORMAT == 1
+	const FSubstrateTopLayerData TopLayerData = SubstrateUnpackTopLayerData(Substrate.TopLayerTexture.Load(uint3(PixelPos, 0)));
+	Sample.WorldNormal = TopLayerData.WorldNormal;
+	Sample.bHasNormal = IsSubstrateMaterial(TopLayerData);
+#else
+	const FGBufferData GBuffer = GetGBufferDataUint(PixelPos);
+	Sample.WorldNormal = GBuffer.WorldNormal;
+	Sample.bHasNormal = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT;
+#endif
+
+	Sample.bHasNormal = Sample.bHasNormal && !bFarPlane && dot(Sample.WorldNormal, Sample.WorldNormal) > 0.25;
+	return Sample;
+}
+
+// Loads the target pixel and its axial neighbours (clamped to the view rect) in NeighbourOffsets order.
+void LoadOutlineNeighbourhood(int2 PixelPos, out FThinOutlineSample Center, out FThinOutlineSample Neighbours[4])
+{
+	// Depth and G-buffer are addressed with the scene renderer's view rect.
+	const int2 ViewRectMin = int2(View.ViewRectMin.xy);
+	const int2 ViewRectMax = ViewRectMin + int2(View.ViewSizeAndInvSize.xy) - 1;
+
+	Center = LoadOutlineSample(uint2(PixelPos));
+
+	UNROLL
+	for (uint NeighbourIndex = 0; NeighbourIndex < 4; ++NeighbourIndex)
+	{
+		Neighbours[NeighbourIndex] = LoadOutlineSample(uint2(clamp(PixelPos + NeighbourOffsets[NeighbourIndex], ViewRectMin, ViewRectMax)));
+	}
+}
+
+// Depth discontinuity between the target C and the neighbour N, extrapolating the depth gradient from O through C.
+float GetDepthEdgeMeasure(float DepthC, float DepthN, float DepthO)
+{
+	const float ExpectedDepthN = DepthC + (DepthC - DepthO);
+	const float ExtrapolationError = abs(DepthN - ExpectedDepthN);
+	const float Difference = abs(DepthN - DepthC);
+	return min(ExtrapolationError, Difference) / max(DepthC, 1.0);
+}
+
+// Normal discontinuity between the target C and the neighbour N, extrapolating the normal rotation from O through C.
+float GetCreaseEdgeMeasure(float3 NormalC, float3 NormalN, float3 NormalO)
+{
+	const float3 CrossOC = cross(NormalO, NormalC);
+	const float3 CrossCN = cross(NormalC, NormalN);
+	return min(length(CrossCN - CrossOC), length(CrossCN));
+}
+
+float GetEdgeStrength(float Measure, float Threshold, float Scale)
+{
+	return Measure > Threshold ? saturate((Measure - Threshold) * Scale) : 0.0;
+}
+
+struct FThinOutlineEdges
+{
+	float Silhouette;
+	// Crease strength of each axial direction (NeighbourOffsets order). All zero when the pixel has a silhouette.
+	float Crease[4];
+	// Whether the crease of each direction is a ridge (convex) rather than a valley.
+	bool bRidge[4];
+};
+
+FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neighbours[4])
+{
+	FThinOutlineEdges Edges;
+	Edges.Silhouette = 0.0;
+
+	if (Center.bIsSky)
+	{
+		// A sky pixel next to any geometry is always a silhouette.
+		UNROLL
+		for (uint Index = 0; Index < 4; ++Index)
+		{
+			if (!Neighbours[Index].bIsSky)
+			{
+				Edges.Silhouette = 1.0;
+			}
+		}
+	}
+	else
+	{
+		UNROLL
+		for (uint Index = 0; Index < 4; ++Index)
+		{
+			const FThinOutlineSample Neighbour = Neighbours[Index];
+
+			// Silhouettes belong to the background side only: the target must be farther than the neighbour.
+			if (Center.Depth > Neighbour.Depth)
+			{
+				const float DepthMeasure = GetDepthEdgeMeasure(Center.Depth, Neighbour.Depth, Neighbours[Index ^ 1].Depth);
+				Edges.Silhouette = max(Edges.Silhouette, GetEdgeStrength(DepthMeasure, SilhouetteThreshold, SilhouetteScale));
+			}
+		}
+	}
+
+	UNROLL
+	for (uint Index = 0; Index < 4; ++Index)
+	{
+		Edges.Crease[Index] = 0.0;
+		Edges.bRidge[Index] = false;
+
+		const FThinOutlineSample Neighbour = Neighbours[Index];
+		const FThinOutlineSample Opposite = Neighbours[Index ^ 1];
+
+		// Silhouettes take priority: a pixel with a silhouette is not a crease candidate.
+		// Creases only exist between pixels of a depth-continuous surface. This also keeps the foreground side
+		// of a silhouette (which has no silhouette strength itself) free of creases.
+		const float DepthMeasure = GetDepthEdgeMeasure(Center.Depth, Neighbour.Depth, Opposite.Depth);
+		if (Edges.Silhouette <= 0.0 && Center.bHasNormal && Neighbour.bHasNormal && DepthMeasure <= SilhouetteThreshold)
+		{
+			// If the opposite pixel is not on the same surface, there is no normal rotation to extrapolate.
+			const bool bOppositeOnSurface = Opposite.bHasNormal
+				&& GetDepthEdgeMeasure(Center.Depth, Opposite.Depth, Neighbour.Depth) <= SilhouetteThreshold;
+			const float3 OppositeNormal = bOppositeOnSurface ? Opposite.WorldNormal : Center.WorldNormal;
+
+			const float CreaseMeasure = GetCreaseEdgeMeasure(Center.WorldNormal, Neighbour.WorldNormal, OppositeNormal);
+
+			// Convex when the normals diverge along the direction from the target to the neighbour.
+			const float3 NormalChange = Neighbour.WorldNormal - Center.WorldNormal;
+			const float3 PositionChange = Neighbour.TranslatedWorldPosition - Center.TranslatedWorldPosition;
+			Edges.bRidge[Index] = dot(NormalChange, PositionChange) > 0.0;
+			Edges.Crease[Index] = GetEdgeStrength(CreaseMeasure, Edges.bRidge[Index] ? CreaseRidgeThreshold : CreaseValleyThreshold, CreaseScale);
+		}
+	}
+
+	return Edges;
+}
+
+//------------------------------------------------------- EDGE RECORDS
+
+// Running statistics of the samples of one inducer axis, as (u, v) = (along the axis, across it).
+// Moments are central, so moving a record to other pixel-local coordinates only moves its mean.
+struct FThinOutlineRecord
+{
+	// Decayed sample count n.
+	float SampleCount;
+	float2 Mean;
+	float2 Variance;
+	float Covariance;
+	// Fraction of the samples that were recorded on frames where both checks of the axis fired.
+	float CoTriggerRatio;
+	// Mean crease strength of the samples.
+	float Strength;
+};
+
+FThinOutlineRecord GetEmptyRecord()
+{
+	return (FThinOutlineRecord)0;
+}
+
+// Two RGBA16F textures per axis: A = (n, mean u, mean v, co-trigger ratio), B = (variance u, variance v, covariance, strength).
+FThinOutlineRecord UnpackRecord(float4 A, float4 B)
+{
+	FThinOutlineRecord Record;
+	Record.SampleCount = A.x;
+	Record.Mean = A.yz;
+	Record.CoTriggerRatio = A.w;
+	Record.Variance = B.xy;
+	Record.Covariance = B.z;
+	Record.Strength = B.w;
+	return Record;
+}
+
+void PackRecord(FThinOutlineRecord Record, out float4 A, out float4 B)
+{
+	A = float4(Record.SampleCount, Record.Mean, Record.CoTriggerRatio);
+	B = float4(Record.Variance, Record.Covariance, Record.Strength);
+}
+
+// Exponentially weighted update of the running mean and central moments with one new sample of weight 1.
+void AddRecordSample(inout FThinOutlineRecord Record, float2 Sample, float CoTrigger, float Strength)
+{
+	Record.SampleCount += 1.0;
+	const float Alpha = rcp(Record.SampleCount);
+	const float2 Delta = Sample - Record.Mean;
+
+	Record.Mean += Alpha * Delta;
+	Record.Variance = (1.0 - Alpha) * (Record.Variance + Alpha * Delta * Delta);
+	Record.Covariance = (1.0 - Alpha) * (Record.Covariance + Alpha * Delta.x * Delta.y);
+	Record.CoTriggerRatio += Alpha * (CoTrigger - Record.CoTriggerRatio);
+	Record.Strength += Alpha * (Strength - Record.Strength);
+}
+
+// Re-expresses a record in the local coordinates of a pixel whose origin is at Offset = (along, across) in the
+// record's coordinates. u stores trapezoid midlines, whose far side is pinned to the pixel boundary, so it moves
+// at half rate.
+void ShiftRecord(inout FThinOutlineRecord Record, float2 Offset)
+{
+	Record.Mean -= float2(0.5 * Offset.x, Offset.y);
+}
+
+// Statistics of the union of the samples of two records (expressed in the same coordinates).
+FThinOutlineRecord MergeRecords(FThinOutlineRecord Record0, FThinOutlineRecord Record1)
+{
+	FThinOutlineRecord Merged;
+	Merged.SampleCount = Record0.SampleCount + Record1.SampleCount;
+
+	const float Weight0 = Merged.SampleCount > 0.0 ? Record0.SampleCount / Merged.SampleCount : 0.0;
+	const float Weight1 = 1.0 - Weight0;
+
+	Merged.Mean = Weight0 * Record0.Mean + Weight1 * Record1.Mean;
+
+	const float2 Delta0 = Record0.Mean - Merged.Mean;
+	const float2 Delta1 = Record1.Mean - Merged.Mean;
+	Merged.Variance = Weight0 * (Record0.Variance + Delta0 * Delta0) + Weight1 * (Record1.Variance + Delta1 * Delta1);
+	Merged.Covariance = Weight0 * (Record0.Covariance + Delta0.x * Delta0.y) + Weight1 * (Record1.Covariance + Delta1.x * Delta1.y);
+	Merged.CoTriggerRatio = Weight0 * Record0.CoTriggerRatio + Weight1 * Record1.CoTriggerRatio;
+	Merged.Strength = Weight0 * Record0.Strength + Weight1 * Record1.Strength;
+	return Merged;
+}
+
+// Edge u = Intercept + Slope * v in pixel-local coordinates (u, v) of its axis, reconstructed from a record by OLS.
+struct FThinOutlineEdgeFit
+{
+	bool bValid;
+	float Intercept;
+	float Slope;
+	// Standard error of the slope b of the OLS line u = a + b v through the record (not of the doubled edge line).
+	float SlopeStandardError;
+};
+
+// DistinctSampleScale converts the decayed sample count into the number of distinct jitter positions behind it, which is
+// what the sample count of the standard errors has to be: repeated positions add no information, and a record of only
+// two distinct positions fits a line exactly, with a zero standard error.
+FThinOutlineEdgeFit FitEdge(FThinOutlineRecord Record, float DistinctSampleScale)
+{
+	FThinOutlineEdgeFit Fit = (FThinOutlineEdgeFit)0;
+
+	const float SampleCount = Record.SampleCount * DistinctSampleScale;
+	Fit.bValid = SampleCount >= THIN_OUTLINE_MIN_FIT_SAMPLE_COUNT && Record.Variance.y > THIN_OUTLINE_MIN_FIT_VARIANCE;
+	if (!Fit.bValid)
+	{
+		return Fit;
+	}
+
+	const float B = Record.Covariance / Record.Variance.y;
+	const float A = Record.Mean.x - B * Record.Mean.y;
+
+	const float ResidualVariance = max(Record.Variance.x - Record.Covariance * B, 0.0) * SampleCount / (SampleCount - 2.0);
+	Fit.SlopeStandardError = sqrt(ResidualVariance / (SampleCount * Record.Variance.y));
+
+	// The record fits the trapezoid midline u = 0.5 + E / 2.
+	Fit.Intercept = 2.0 * A - 1.0;
+	Fit.Slope = 2.0 * B;
+	return Fit;
+}
+
+//------------------------------------------------------- COVERAGE
+
+// Integral over Length of max(g, 0), with g linear from G0 to G1.
+float IntegrateRamp(float G0, float G1, float Length)
+{
+	const float GMin = min(G0, G1);
+	const float GMax = max(G0, G1);
+
+	if (GMin >= 0.0)
+	{
+		return Length * 0.5 * (G0 + G1);
+	}
+	if (GMax <= 0.0)
+	{
+		return 0.0;
+	}
+	return Length * 0.5 * GMax * GMax / (GMax - GMin);
+}
+
+// Area of {(u, v) in [RectMin, RectMax] : u - Slope * v <= Offset}.
+float GetHalfPlaneArea(float Offset, float Slope, float2 RectMin, float2 RectMax)
+{
+	const float Width = RectMax.x - RectMin.x;
+	const float Height = RectMax.y - RectMin.y;
+
+	// Extent along u of the half plane inside the rect, measured from RectMin.x, at both ends of the v range.
+	const float G0 = Offset + Slope * RectMin.y - RectMin.x;
+	const float G1 = Offset + Slope * RectMax.y - RectMin.x;
+	return IntegrateRamp(G0, G1, Height) - IntegrateRamp(G0 - Width, G1 - Width, Height);
+}
+
+// Area of the band of half width HalfThickness around the line u = Intercept + Slope * v inside [RectMin, RectMax].
+float GetBandArea(float Intercept, float Slope, float HalfThickness, float2 RectMin, float2 RectMax)
+{
+	const float HalfWidthAlongU = HalfThickness * sqrt(1.0 + Slope * Slope);
+	return GetHalfPlaneArea(Intercept + HalfWidthAlongU, Slope, RectMin, RectMax)
+		- GetHalfPlaneArea(Intercept - HalfWidthAlongU, Slope, RectMin, RectMax);
+}
