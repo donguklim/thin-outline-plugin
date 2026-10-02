@@ -27,9 +27,10 @@ public:
 	FLinearColor OutlineColor;
 
 	/**
-	 * Silhouettes are drawn on the background pixel of a depth discontinuity.
+	 * Silhouettes are drawn on the background pixel of a depth discontinuity, and take priority over creases.
 	 * Edge measure: min(|second difference|, |first difference|) of linear depth, divided by the target pixel's linear depth.
 	 * Measures at or below this threshold produce no silhouette.
+	 * Sky pixels (no depth) next to any geometry are always full silhouettes, regardless of this threshold.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.Threshold", ClampMin = "0.0", UIMax = "0.2"))
 	float SilhouetteThreshold;
@@ -39,7 +40,7 @@ public:
 	float SilhouetteScale;
 
 	/**
-	 * Threshold for convex creases.
+	 * Threshold for convex creases. Creases are only drawn on pixels without a silhouette.
 	 * Edge measure: min(|cross(Nc, Nn) - cross(No, Nc)|, |cross(Nc, Nn)|) of world normals, i.e. the sine of the normal angle for a sharp edge.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.RidgeThreshold", ClampMin = "0.0", UIMax = "1.0"))

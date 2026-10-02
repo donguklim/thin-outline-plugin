@@ -10,10 +10,12 @@
 		The gradient from O to C is added to C to get the expected depth at N.
 		Measure = min(|N - (C + (C - O))|, |N - C|) / max(C, 1)
 		Silhouettes are only drawn on the background pixel (C farther than N).
+		A sky pixel (no depth) with any non-sky axial neighbour is always a full silhouette.
 
 	Crease (world normals):
 		Measure = min(|cross(C, N) - cross(O, C)|, |cross(C, N)|)
 		Ridges (convex) and valleys (concave) use separate thresholds.
+		Only evaluated when the pixel has no silhouette: silhouettes take priority.
 
 	Strength = Measure > Threshold ? saturate((Measure - Threshold) * Scale) : 0
 	The largest strength over the four directions is drawn.
@@ -49,6 +51,8 @@ struct FThinOutlineSample
 	float Depth;
 	float3 WorldNormal;
 	float3 TranslatedWorldPosition;
+	// Nothing was drawn: the depth buffer is still at the (infinite) far plane.
+	bool bIsSky;
 	// False for sky, unlit and other pixels without a G-buffer normal. Such pixels never get creases.
 	bool bHasNormal;
 };
@@ -60,6 +64,7 @@ FThinOutlineSample LoadOutlineSample(uint2 PixelPos)
 	const float DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(PixelPos, 0)).r;
 	const bool bFarPlane = DeviceZ <= 1e-7;
 
+	Sample.bIsSky = bFarPlane;
 	Sample.Depth = bFarPlane ? THIN_OUTLINE_FAR_DEPTH : ConvertFromDeviceZ(DeviceZ);
 	Sample.TranslatedWorldPosition = bFarPlane ? float3(0, 0, 0) : SvPositionToTranslatedWorld(float4(float2(PixelPos) + 0.5, DeviceZ, 1.0));
 
@@ -128,40 +133,66 @@ void MainPS(
 	float Ridge = 0.0;
 	float Valley = 0.0;
 
-	UNROLL
-	for (uint Index = 0; Index < 4; ++Index)
+	if (Center.bIsSky)
 	{
-		const FThinOutlineSample Neighbour = Neighbours[Index];
-		const FThinOutlineSample Opposite = Neighbours[Index ^ 1];
-
-		const float DepthMeasure = GetDepthEdgeMeasure(Center.Depth, Neighbour.Depth, Opposite.Depth);
-
-		// Silhouettes are drawn on the background side only: the target must be farther than the neighbour.
-		if (Center.Depth > Neighbour.Depth)
+		// A sky pixel next to any geometry is always a silhouette.
+		UNROLL
+		for (uint Index = 0; Index < 4; ++Index)
 		{
-			Silhouette = max(Silhouette, GetEdgeStrength(DepthMeasure, SilhouetteThreshold, SilhouetteScale));
-		}
-
-		// Creases only exist between pixels of a depth-continuous surface; anything else is a silhouette.
-		if (Center.bHasNormal && Neighbour.bHasNormal && DepthMeasure <= SilhouetteThreshold)
-		{
-			// If the opposite pixel is not on the same surface, there is no normal rotation to extrapolate.
-			const bool bOppositeOnSurface = Opposite.bHasNormal
-				&& GetDepthEdgeMeasure(Center.Depth, Opposite.Depth, Neighbour.Depth) <= SilhouetteThreshold;
-			const float3 OppositeNormal = bOppositeOnSurface ? Opposite.WorldNormal : Center.WorldNormal;
-
-			const float CreaseMeasure = GetCreaseEdgeMeasure(Center.WorldNormal, Neighbour.WorldNormal, OppositeNormal);
-
-			// Convex when the normals diverge along the direction from the target to the neighbour.
-			const float3 NormalChange = Neighbour.WorldNormal - Center.WorldNormal;
-			const float3 PositionChange = Neighbour.TranslatedWorldPosition - Center.TranslatedWorldPosition;
-			if (dot(NormalChange, PositionChange) > 0.0)
+			if (!Neighbours[Index].bIsSky)
 			{
-				Ridge = max(Ridge, GetEdgeStrength(CreaseMeasure, CreaseRidgeThreshold, CreaseScale));
+				Silhouette = 1.0;
 			}
-			else
+		}
+	}
+	else
+	{
+		UNROLL
+		for (uint Index = 0; Index < 4; ++Index)
+		{
+			const FThinOutlineSample Neighbour = Neighbours[Index];
+
+			// Silhouettes are drawn on the background side only: the target must be farther than the neighbour.
+			if (Center.Depth > Neighbour.Depth)
 			{
-				Valley = max(Valley, GetEdgeStrength(CreaseMeasure, CreaseValleyThreshold, CreaseScale));
+				const float DepthMeasure = GetDepthEdgeMeasure(Center.Depth, Neighbour.Depth, Neighbours[Index ^ 1].Depth);
+				Silhouette = max(Silhouette, GetEdgeStrength(DepthMeasure, SilhouetteThreshold, SilhouetteScale));
+			}
+		}
+	}
+
+	// Silhouettes take priority: creases are only evaluated for pixels without any silhouette.
+	if (Silhouette <= 0.0)
+	{
+		UNROLL
+		for (uint Index = 0; Index < 4; ++Index)
+		{
+			const FThinOutlineSample Neighbour = Neighbours[Index];
+			const FThinOutlineSample Opposite = Neighbours[Index ^ 1];
+
+			// Creases only exist between pixels of a depth-continuous surface. This also keeps the foreground side
+			// of a silhouette (which has no silhouette strength itself) free of creases.
+			const float DepthMeasure = GetDepthEdgeMeasure(Center.Depth, Neighbour.Depth, Opposite.Depth);
+			if (Center.bHasNormal && Neighbour.bHasNormal && DepthMeasure <= SilhouetteThreshold)
+			{
+				// If the opposite pixel is not on the same surface, there is no normal rotation to extrapolate.
+				const bool bOppositeOnSurface = Opposite.bHasNormal
+					&& GetDepthEdgeMeasure(Center.Depth, Opposite.Depth, Neighbour.Depth) <= SilhouetteThreshold;
+				const float3 OppositeNormal = bOppositeOnSurface ? Opposite.WorldNormal : Center.WorldNormal;
+
+				const float CreaseMeasure = GetCreaseEdgeMeasure(Center.WorldNormal, Neighbour.WorldNormal, OppositeNormal);
+
+				// Convex when the normals diverge along the direction from the target to the neighbour.
+				const float3 NormalChange = Neighbour.WorldNormal - Center.WorldNormal;
+				const float3 PositionChange = Neighbour.TranslatedWorldPosition - Center.TranslatedWorldPosition;
+				if (dot(NormalChange, PositionChange) > 0.0)
+				{
+					Ridge = max(Ridge, GetEdgeStrength(CreaseMeasure, CreaseRidgeThreshold, CreaseScale));
+				}
+				else
+				{
+					Valley = max(Valley, GetEdgeStrength(CreaseMeasure, CreaseValleyThreshold, CreaseScale));
+				}
 			}
 		}
 	}
