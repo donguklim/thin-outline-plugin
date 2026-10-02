@@ -1,0 +1,173 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+/*=============================================================================
+	ThinOutline.usf: G-buffer outlines at rendering resolution.
+
+	For a target pixel C, each axial neighbour N (left, right, top, bottom) is tested
+	with O, the pixel on the opposite side of C:
+
+	Silhouette (linear depth, i.e. distance from the camera plane):
+		The gradient from O to C is added to C to get the expected depth at N.
+		Measure = min(|N - (C + (C - O))|, |N - C|) / max(C, 1)
+		Silhouettes are only drawn on the background pixel (C farther than N).
+
+	Crease (world normals):
+		Measure = min(|cross(C, N) - cross(O, C)|, |cross(C, N)|)
+		Ridges (convex) and valleys (concave) use separate thresholds.
+
+	Strength = Measure > Threshold ? saturate((Measure - Threshold) * Scale) : 0
+	The largest strength over the four directions is drawn.
+=============================================================================*/
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/ScreenPass.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+#include "/Engine/Private/Substrate/Substrate.ush"
+
+SCREEN_PASS_TEXTURE_VIEWPORT(Input)
+SCREEN_PASS_TEXTURE_VIEWPORT(Output)
+
+Texture2D InputSceneColorTexture;
+
+float3 OutlineColor;
+float SilhouetteThreshold;
+float SilhouetteScale;
+float CreaseRidgeThreshold;
+float CreaseValleyThreshold;
+float CreaseScale;
+uint DebugView;
+
+// Linear depth used for pixels on the far plane (sky), so they act as the farthest background.
+#define THIN_OUTLINE_FAR_DEPTH 1.0e20
+
+// Ordered so that (Index ^ 1) is the opposite neighbour: left, right, top, bottom.
+static const int2 NeighbourOffsets[4] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
+
+struct FThinOutlineSample
+{
+	// Linear depth: distance from the camera plane.
+	float Depth;
+	float3 WorldNormal;
+	float3 TranslatedWorldPosition;
+	// False for sky, unlit and other pixels without a G-buffer normal. Such pixels never get creases.
+	bool bHasNormal;
+};
+
+FThinOutlineSample LoadOutlineSample(uint2 PixelPos)
+{
+	FThinOutlineSample Sample;
+
+	const float DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(PixelPos, 0)).r;
+	const bool bFarPlane = DeviceZ <= 1e-7;
+
+	Sample.Depth = bFarPlane ? THIN_OUTLINE_FAR_DEPTH : ConvertFromDeviceZ(DeviceZ);
+	Sample.TranslatedWorldPosition = bFarPlane ? float3(0, 0, 0) : SvPositionToTranslatedWorld(float4(float2(PixelPos) + 0.5, DeviceZ, 1.0));
+
+#if SUBSTRATE_GBUFFER_FORMAT == 1
+	const FSubstrateTopLayerData TopLayerData = SubstrateUnpackTopLayerData(Substrate.TopLayerTexture.Load(uint3(PixelPos, 0)));
+	Sample.WorldNormal = TopLayerData.WorldNormal;
+	Sample.bHasNormal = IsSubstrateMaterial(TopLayerData);
+#else
+	const FGBufferData GBuffer = GetGBufferDataUint(PixelPos);
+	Sample.WorldNormal = GBuffer.WorldNormal;
+	Sample.bHasNormal = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT;
+#endif
+
+	Sample.bHasNormal = Sample.bHasNormal && !bFarPlane && dot(Sample.WorldNormal, Sample.WorldNormal) > 0.25;
+	return Sample;
+}
+
+// Depth discontinuity between the target C and the neighbour N, extrapolating the depth gradient from O through C.
+float GetDepthEdgeMeasure(float DepthC, float DepthN, float DepthO)
+{
+	const float ExpectedDepthN = DepthC + (DepthC - DepthO);
+	const float ExtrapolationError = abs(DepthN - ExpectedDepthN);
+	const float Difference = abs(DepthN - DepthC);
+	return min(ExtrapolationError, Difference) / max(DepthC, 1.0);
+}
+
+// Normal discontinuity between the target C and the neighbour N, extrapolating the normal rotation from O through C.
+float GetCreaseEdgeMeasure(float3 NormalC, float3 NormalN, float3 NormalO)
+{
+	const float3 CrossOC = cross(NormalO, NormalC);
+	const float3 CrossCN = cross(NormalC, NormalN);
+	return min(length(CrossCN - CrossOC), length(CrossCN));
+}
+
+float GetEdgeStrength(float Measure, float Threshold, float Scale)
+{
+	return Measure > Threshold ? saturate((Measure - Threshold) * Scale) : 0.0;
+}
+
+void MainPS(
+	float4 SvPosition : SV_POSITION,
+	out float4 OutColor : SV_Target0)
+{
+	const uint2 ViewportPos = uint2(SvPosition.xy) - Output_ViewportMin;
+	const float4 SceneColor = InputSceneColorTexture.Load(int3(Input_ViewportMin + ViewportPos, 0));
+
+	// Depth and G-buffer are addressed with the scene renderer's view rect.
+	const int2 ViewRectMin = int2(View.ViewRectMin.xy);
+	const int2 ViewRectMax = ViewRectMin + int2(View.ViewSizeAndInvSize.xy) - 1;
+	const int2 PixelPos = ViewRectMin + int2(ViewportPos);
+
+	const FThinOutlineSample Center = LoadOutlineSample(uint2(PixelPos));
+
+	FThinOutlineSample Neighbours[4];
+	UNROLL
+	for (uint NeighbourIndex = 0; NeighbourIndex < 4; ++NeighbourIndex)
+	{
+		Neighbours[NeighbourIndex] = LoadOutlineSample(uint2(clamp(PixelPos + NeighbourOffsets[NeighbourIndex], ViewRectMin, ViewRectMax)));
+	}
+
+	float Silhouette = 0.0;
+	float Ridge = 0.0;
+	float Valley = 0.0;
+
+	UNROLL
+	for (uint Index = 0; Index < 4; ++Index)
+	{
+		const FThinOutlineSample Neighbour = Neighbours[Index];
+		const FThinOutlineSample Opposite = Neighbours[Index ^ 1];
+
+		const float DepthMeasure = GetDepthEdgeMeasure(Center.Depth, Neighbour.Depth, Opposite.Depth);
+
+		// Silhouettes are drawn on the background side only: the target must be farther than the neighbour.
+		if (Center.Depth > Neighbour.Depth)
+		{
+			Silhouette = max(Silhouette, GetEdgeStrength(DepthMeasure, SilhouetteThreshold, SilhouetteScale));
+		}
+
+		// Creases only exist between pixels of a depth-continuous surface; anything else is a silhouette.
+		if (Center.bHasNormal && Neighbour.bHasNormal && DepthMeasure <= SilhouetteThreshold)
+		{
+			// If the opposite pixel is not on the same surface, there is no normal rotation to extrapolate.
+			const bool bOppositeOnSurface = Opposite.bHasNormal
+				&& GetDepthEdgeMeasure(Center.Depth, Opposite.Depth, Neighbour.Depth) <= SilhouetteThreshold;
+			const float3 OppositeNormal = bOppositeOnSurface ? Opposite.WorldNormal : Center.WorldNormal;
+
+			const float CreaseMeasure = GetCreaseEdgeMeasure(Center.WorldNormal, Neighbour.WorldNormal, OppositeNormal);
+
+			// Convex when the normals diverge along the direction from the target to the neighbour.
+			const float3 NormalChange = Neighbour.WorldNormal - Center.WorldNormal;
+			const float3 PositionChange = Neighbour.TranslatedWorldPosition - Center.TranslatedWorldPosition;
+			if (dot(NormalChange, PositionChange) > 0.0)
+			{
+				Ridge = max(Ridge, GetEdgeStrength(CreaseMeasure, CreaseRidgeThreshold, CreaseScale));
+			}
+			else
+			{
+				Valley = max(Valley, GetEdgeStrength(CreaseMeasure, CreaseValleyThreshold, CreaseScale));
+			}
+		}
+	}
+
+	if (DebugView != 0)
+	{
+		OutColor = float4(Silhouette, Ridge, Valley, SceneColor.a);
+		return;
+	}
+
+	const float Outline = max(Silhouette, max(Ridge, Valley));
+	OutColor = float4(lerp(SceneColor.rgb, OutlineColor, Outline), SceneColor.a);
+}

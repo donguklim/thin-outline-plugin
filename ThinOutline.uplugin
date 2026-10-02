@@ -18,7 +18,7 @@
 		{
 			"Name": "ThinOutline",
 			"Type": "Runtime",
-			"LoadingPhase": "Default"
+			"LoadingPhase": "PostConfigInit"
 		}
 	]
 }
