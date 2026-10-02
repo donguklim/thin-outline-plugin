@@ -99,7 +99,11 @@ float GetEdgeStrength(float Measure, float Threshold, float Scale)
 	return Measure > Threshold ? saturate((Measure - Threshold) * Scale) : 0.0;
 }
 
+// Drawn with FScreenPassVS (AddDrawScreenPass): the inputs must match its outputs in order, even when unused,
+// otherwise the VS/PS signatures do not link and D3D12 fails to create the pipeline state.
 void MainPS(
+	noperspective float4 UVAndScreenPos : TEXCOORD0,
+	FStereoPSInput StereoInput,
 	float4 SvPosition : SV_POSITION,
 	out float4 OutColor : SV_Target0)
 {
