@@ -37,7 +37,8 @@
 	The statistics are decayed running averages: every frame, the sample count n is multiplied by (1 - d), and a new
 	sample is averaged in with weight 1 / n, so samples are weighted by (1 - d)^age.
 	A silhouette is only sampled by its background pixels, through the check facing the foreground, so the fraction
-	of samples that came through the left (top) check says on which side the foreground is.
+	of samples that came through the left (top) check says on which side the foreground is. Silhouette records also
+	keep the mean depth of the foreground neighbours of their samples, which their history depth test uses.
 =============================================================================*/
 
 #pragma once
@@ -295,6 +296,10 @@ FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neig
 #define EDGE_CREASE 0
 #define EDGE_SILHOUETTE 1
 
+// The foreground depth of silhouette records is stored in fp16 in meters (linear depth is in cm): up to 65 km, with
+// 0.05% relative precision.
+#define THIN_OUTLINE_FOREGROUND_DEPTH_STORE_SCALE 0.01
+
 // Running statistics of the samples of one inducer axis, as (u, v) = (along the axis, across it).
 // Moments are central, so moving a record to other pixel-local coordinates only moves its mean.
 struct FThinOutlineRecord
@@ -311,6 +316,9 @@ struct FThinOutlineRecord
 	// Fraction of the samples recorded through the left (top) check. Only stored for silhouettes, where it is close
 	// to 1 when the foreground is on the left (top) and close to 0 when it is on the right (bottom).
 	float KeptRatio;
+	// Mean linear depth of the neighbour each sample's check compared with, i.e. of the foreground. Only stored for
+	// silhouettes.
+	float ForegroundDepth;
 };
 
 FThinOutlineRecord GetEmptyRecord()
@@ -319,7 +327,8 @@ FThinOutlineRecord GetEmptyRecord()
 }
 
 // Two RGBA16F textures per axis: A = (n, mean u, mean v, co-trigger ratio), B = (variance u, variance v, covariance,
-// strength), with -n for silhouette records. The kept ratio of silhouette records is stored separately.
+// strength), with -n for silhouette records. The kept ratio and foreground depth of silhouette records are stored
+// separately.
 FThinOutlineRecord UnpackRecord(float4 A, float4 B, out uint EdgeType)
 {
 	FThinOutlineRecord Record;
@@ -330,6 +339,7 @@ FThinOutlineRecord UnpackRecord(float4 A, float4 B, out uint EdgeType)
 	Record.Covariance = B.z;
 	Record.Strength = B.w;
 	Record.KeptRatio = 0.0;
+	Record.ForegroundDepth = 0.0;
 	EdgeType = A.x < 0.0 ? EDGE_SILHOUETTE : EDGE_CREASE;
 	return Record;
 }
@@ -341,8 +351,9 @@ void PackRecord(FThinOutlineRecord Record, uint EdgeType, out float4 A, out floa
 }
 
 // Exponentially weighted update of the running mean and central moments with one new sample of weight 1.
-// Kept is 1 for a sample of the left (top) check, 0 for one of the right (bottom) check.
-void AddRecordSample(inout FThinOutlineRecord Record, float2 Sample, float Kept, float CoTrigger, float Strength)
+// Kept is 1 for a sample of the left (top) check, 0 for one of the right (bottom) check. ForegroundDepth is the linear
+// depth of the neighbour the check compared with (only used by silhouette records).
+void AddRecordSample(inout FThinOutlineRecord Record, float2 Sample, float Kept, float CoTrigger, float Strength, float ForegroundDepth)
 {
 	Record.SampleCount += 1.0;
 	const float Alpha = rcp(Record.SampleCount);
@@ -354,6 +365,7 @@ void AddRecordSample(inout FThinOutlineRecord Record, float2 Sample, float Kept,
 	Record.CoTriggerRatio += Alpha * (CoTrigger - Record.CoTriggerRatio);
 	Record.Strength += Alpha * (Strength - Record.Strength);
 	Record.KeptRatio += Alpha * (Kept - Record.KeptRatio);
+	Record.ForegroundDepth += Alpha * (ForegroundDepth - Record.ForegroundDepth);
 }
 
 // Re-expresses a record in the local coordinates of a pixel whose origin is at Offset = (along, across) in the
@@ -382,6 +394,7 @@ FThinOutlineRecord MergeRecords(FThinOutlineRecord Record0, FThinOutlineRecord R
 	Merged.CoTriggerRatio = Weight0 * Record0.CoTriggerRatio + Weight1 * Record1.CoTriggerRatio;
 	Merged.Strength = Weight0 * Record0.Strength + Weight1 * Record1.Strength;
 	Merged.KeptRatio = Weight0 * Record0.KeptRatio + Weight1 * Record1.KeptRatio;
+	Merged.ForegroundDepth = Weight0 * Record0.ForegroundDepth + Weight1 * Record1.ForegroundDepth;
 	return Merged;
 }
 

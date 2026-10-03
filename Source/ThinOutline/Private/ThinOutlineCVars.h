@@ -33,3 +33,5 @@ extern TAutoConsoleVariable<int32> CVarThinOutlineEstimatorHistoryReprojection;
 
 // Debugging
 extern TAutoConsoleVariable<float> CVarThinOutlineDebugCameraPan;
+extern TAutoConsoleVariable<float> CVarThinOutlineDebugCameraOrbit;
+extern TAutoConsoleVariable<float> CVarThinOutlineDebugCameraOrbitDistance;

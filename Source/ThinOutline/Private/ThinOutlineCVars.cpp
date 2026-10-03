@@ -54,10 +54,10 @@ TAutoConsoleVariable<int32> CVarThinOutlineSilhouetteSymmetricMeasure(
 
 TAutoConsoleVariable<float> CVarThinOutlineSilhouetteHistoryDepthThreshold(
 	TEXT("r.ThinOutline.Silhouette.HistoryDepthThreshold"),
-	0.02f,
-	TEXT("Relative depth tolerance for keeping a reprojected silhouette record: its foreground depth must lie within the depth\n")
-	TEXT("range of the current foreground's surface (the foreground pixel and its axial neighbours on the same surface),\n")
-	TEXT("widened by this fraction of the depth.\n"),
+	0.05f,
+	TEXT("Relative depth tolerance for keeping a reprojected silhouette record: its foreground depth (the mean depth of the\n")
+	TEXT("foreground neighbours of its samples) must match the depth of the pixel itself, or of one of the two pixels toward\n")
+	TEXT("the record's foreground side, within this fraction of the depth.\n"),
 	ECVF_Default
 );
 
@@ -72,9 +72,10 @@ TAutoConsoleVariable<float> CVarThinOutlineSilhouetteThickness(
 
 TAutoConsoleVariable<float> CVarThinOutlineSilhouetteHistoryViewAngle(
 	TEXT("r.ThinOutline.Silhouette.HistoryViewAngle"),
-	5.0f,
-	TEXT("Silhouette records are rejected when the direction their foreground is seen from turns by more than this many\n")
-	TEXT("degrees in one frame, since a silhouette slides over the surface as the view direction changes.\n"),
+	1.0f,
+	TEXT("Silhouette records are rejected when the view direction turns out of the plane through the camera and the edge by\n")
+	TEXT("more than this many degrees in one frame. At a smooth contour that plane is the surface's tangent plane: turning\n")
+	TEXT("within it moves the contour along itself, turning out of it slides the contour over the surface.\n"),
 	ECVF_Default
 );
 
@@ -169,5 +170,20 @@ TAutoConsoleVariable<float> CVarThinOutlineDebugCameraPan(
 	0.0f,
 	TEXT("Debugging: moves game cameras to the right by this many more cm every frame (0 = off), to test the outline under\n")
 	TEXT("steady camera motion where nothing drives the camera, e.g. offscreen captures.\n"),
+	ECVF_Cheat
+);
+
+TAutoConsoleVariable<float> CVarThinOutlineDebugCameraOrbit(
+	TEXT("r.ThinOutline.Debug.CameraOrbit"),
+	0.0f,
+	TEXT("Debugging: turns game cameras around a vertical axis through a point in front of them by this many more degrees\n")
+	TEXT("every frame (0 = off), to test silhouettes of smooth objects under a steady orbit, e.g. offscreen captures.\n"),
+	ECVF_Cheat
+);
+
+TAutoConsoleVariable<float> CVarThinOutlineDebugCameraOrbitDistance(
+	TEXT("r.ThinOutline.Debug.CameraOrbitDistance"),
+	400.0f,
+	TEXT("Debugging: distance in cm in front of the camera of the axis r.ThinOutline.Debug.CameraOrbit turns around.\n"),
 	ECVF_Cheat
 );

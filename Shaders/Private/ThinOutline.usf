@@ -38,7 +38,8 @@ Texture2D<float4> HorizontalA;
 Texture2D<float4> HorizontalB;
 Texture2D<float4> VerticalA;
 Texture2D<float4> VerticalB;
-Texture2D<float2> SilhouetteKept;
+// (kept ratio, kept ratio, foreground depth, foreground depth) of the (horizontal, vertical) silhouette records.
+Texture2D<float4> SilhouetteForeground;
 
 // Device Z (0 where nothing is overwritten) and encoded velocity to give each pixel, indexed by viewport position.
 RWTexture2D<float> RWForegroundDeviceZ;
@@ -78,12 +79,12 @@ FThinOutlineRecord LoadRecord(uint Axis, int2 ViewportPos, out uint EdgeType)
 	if (Axis == AXIS_HORIZONTAL)
 	{
 		Record = UnpackRecord(HorizontalA.Load(Texel), HorizontalB.Load(Texel), EdgeType);
-		Record.KeptRatio = SilhouetteKept.Load(Texel).x;
+		Record.KeptRatio = SilhouetteForeground.Load(Texel).x;
 	}
 	else
 	{
 		Record = UnpackRecord(VerticalA.Load(Texel), VerticalB.Load(Texel), EdgeType);
-		Record.KeptRatio = SilhouetteKept.Load(Texel).y;
+		Record.KeptRatio = SilhouetteForeground.Load(Texel).y;
 	}
 	return Record;
 }

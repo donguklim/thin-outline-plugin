@@ -45,9 +45,9 @@ namespace EThinOutlineHistoryTexture
 		HorizontalB,
 		VerticalA,
 		VerticalB,
-		/** Kept ratio of the horizontal and vertical records, used by silhouette records only. */
-		SilhouetteKept,
-		/** Linear depth of the pixel's surface and of its foreground when the records were written. */
+		/** Kept ratio and foreground depth of the horizontal and vertical records, used by silhouette records only. */
+		SilhouetteForeground,
+		/** Linear depth of the pixel's surface when the records were written. */
 		Depth,
 		Num
 	};
@@ -100,8 +100,8 @@ private:
 
 	/** Updated from BeginRenderViewFamily through a render command, so it always matches the family being rendered. */
 	FThinOutlineRenderSettings RenderSettings_RenderThread;
-	/** Sideways camera offset accumulated by r.ThinOutline.Debug.CameraPan (game thread). */
-	float DebugCameraPanOffset = 0.0f;
+	/** GFrameCounter when r.ThinOutline.Debug.CameraPan or CameraOrbit started moving the camera (game thread). */
+	TOptional<uint64> DebugCameraStartFrame;
 
 	/**
 	 * Keyed by FSceneViewStateInterface::GetViewKey(). Heap allocated, because the render graph writes extracted

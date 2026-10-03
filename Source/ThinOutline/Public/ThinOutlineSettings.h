@@ -62,15 +62,17 @@ public:
 	float SilhouetteThickness;
 
 	/**
-	 * Silhouette records are rejected when the direction their foreground is seen from turns by more than this many degrees in one frame,
-	 * since a silhouette slides over the surface as the view direction changes.
+	 * Silhouette records are rejected when the view direction turns out of the plane through the camera and the edge by more than this many
+	 * degrees in one frame. At a smooth contour that plane is the surface's tangent plane: turning within it moves the contour along itself,
+	 * turning out of it slides the contour over the surface.
 	 */
-	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.HistoryViewAngle", ClampMin = "0.0", UIMax = "30.0", Units = "Degrees"))
+	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.HistoryViewAngle", ClampMin = "0.0", ClampMax = "90.0", UIMax = "10.0", Units = "Degrees"))
 	float SilhouetteHistoryViewAngle;
 
 	/**
-	 * Relative depth tolerance for keeping a reprojected silhouette record: its foreground depth must lie within the depth range of the
-	 * current foreground's surface (the foreground pixel and its axial neighbours on the same surface), widened by this fraction of the depth.
+	 * Relative depth tolerance for keeping a reprojected silhouette record: its foreground depth (the mean depth of the foreground neighbours
+	 * of its samples) must match the depth of the pixel itself, or of one of the two pixels toward the record's foreground side, within this
+	 * fraction of the depth.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.HistoryDepthThreshold", ClampMin = "0.0", UIMax = "0.2"))
 	float SilhouetteHistoryDepthThreshold;

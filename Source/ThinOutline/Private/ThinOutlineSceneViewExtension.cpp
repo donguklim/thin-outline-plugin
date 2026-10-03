@@ -34,8 +34,8 @@ namespace ThinOutline
 		{ PF_FloatRGBA, TEXT("ThinOutline.RecordHorizontalB") },
 		{ PF_FloatRGBA, TEXT("ThinOutline.RecordVerticalA") },
 		{ PF_FloatRGBA, TEXT("ThinOutline.RecordVerticalB") },
-		{ PF_G16R16F, TEXT("ThinOutline.SilhouetteKept") },
-		{ PF_G32R32F, TEXT("ThinOutline.RecordDepth") },
+		{ PF_FloatRGBA, TEXT("ThinOutline.SilhouetteForeground") },
+		{ PF_R32_FLOAT, TEXT("ThinOutline.RecordDepth") },
 	};
 }
 
@@ -46,16 +46,33 @@ FThinOutlineSceneViewExtension::FThinOutlineSceneViewExtension(const FAutoRegist
 
 void FThinOutlineSceneViewExtension::SetupViewPoint(APlayerController* Player, FMinimalViewInfo& InViewInfo)
 {
-	// Steady camera motion for offscreen tests, where nothing drives the camera.
+	// Steady camera motion for offscreen tests, where nothing drives the camera. The view point is set up more than once
+	// per frame, so the motion follows the frame counter.
 	const float Pan = CVarThinOutlineDebugCameraPan.GetValueOnGameThread();
-	if (Pan == 0.0f)
+	const float Orbit = CVarThinOutlineDebugCameraOrbit.GetValueOnGameThread();
+	if (Pan == 0.0f && Orbit == 0.0f)
 	{
-		DebugCameraPanOffset = 0.0f;
+		DebugCameraStartFrame.Reset();
 		return;
 	}
 
-	DebugCameraPanOffset += Pan;
-	InViewInfo.Location += InViewInfo.Rotation.RotateVector(FVector(0.0, DebugCameraPanOffset, 0.0));
+	if (!DebugCameraStartFrame.IsSet())
+	{
+		DebugCameraStartFrame = GFrameCounter;
+	}
+	const double Frames = double(GFrameCounter - DebugCameraStartFrame.GetValue() + 1);
+
+	if (Pan != 0.0f)
+	{
+		InViewInfo.Location += InViewInfo.Rotation.RotateVector(FVector(0.0, Pan * Frames, 0.0));
+	}
+	if (Orbit != 0.0f)
+	{
+		const FVector Pivot = InViewInfo.Location + InViewInfo.Rotation.Vector() * CVarThinOutlineDebugCameraOrbitDistance.GetValueOnGameThread();
+		const FQuat Yaw(FVector::UpVector, FMath::DegreesToRadians(Orbit * Frames));
+		InViewInfo.Location = Pivot + Yaw.RotateVector(InViewInfo.Location - Pivot);
+		InViewInfo.Rotation = (Yaw * InViewInfo.Rotation.Quaternion()).Rotator();
+	}
 }
 
 bool FThinOutlineSceneViewExtension::IsActiveThisFrame_Internal(const FSceneViewExtensionContext& Context) const
@@ -72,7 +89,7 @@ void FThinOutlineSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& InV
 	Settings.SilhouetteScale                     = FMath::Max(0.0f, CVarThinOutlineSilhouetteScale.GetValueOnGameThread());
 	Settings.bSilhouetteSymmetricMeasure         = CVarThinOutlineSilhouetteSymmetricMeasure.GetValueOnGameThread() != 0;
 	Settings.SilhouetteThickness                 = FMath::Max(0.0f, CVarThinOutlineSilhouetteThickness.GetValueOnGameThread());
-	Settings.SilhouetteHistoryViewAngle          = FMath::Clamp(CVarThinOutlineSilhouetteHistoryViewAngle.GetValueOnGameThread(), 0.0f, 180.0f);
+	Settings.SilhouetteHistoryViewAngle          = FMath::Clamp(CVarThinOutlineSilhouetteHistoryViewAngle.GetValueOnGameThread(), 0.0f, 90.0f);
 	Settings.SilhouetteCreaseTakeoverSampleCount = FMath::Max(0.0f, CVarThinOutlineSilhouetteCreaseTakeoverSampleCount.GetValueOnGameThread());
 	Settings.CreaseRidgeThreshold                = FMath::Max(0.0f, CVarThinOutlineCreaseRidgeThreshold.GetValueOnGameThread());
 	Settings.CreaseValleyThreshold               = FMath::Max(0.0f, CVarThinOutlineCreaseValleyThreshold.GetValueOnGameThread());
@@ -215,19 +232,19 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->HistoryHorizontalB                  = HistoryRecords[HorizontalB];
 		PassParameters->HistoryVerticalA                    = HistoryRecords[VerticalA];
 		PassParameters->HistoryVerticalB                    = HistoryRecords[VerticalB];
-		PassParameters->HistorySilhouetteKept               = HistoryRecords[SilhouetteKept];
+		PassParameters->HistorySilhouetteForeground         = HistoryRecords[SilhouetteForeground];
 		PassParameters->HistoryDepth                        = HistoryRecords[Depth];
 		PassParameters->RWHorizontalA                       = GraphBuilder.CreateUAV(Records[HorizontalA]);
 		PassParameters->RWHorizontalB                       = GraphBuilder.CreateUAV(Records[HorizontalB]);
 		PassParameters->RWVerticalA                         = GraphBuilder.CreateUAV(Records[VerticalA]);
 		PassParameters->RWVerticalB                         = GraphBuilder.CreateUAV(Records[VerticalB]);
-		PassParameters->RWSilhouetteKept                    = GraphBuilder.CreateUAV(Records[SilhouetteKept]);
+		PassParameters->RWSilhouetteForeground              = GraphBuilder.CreateUAV(Records[SilhouetteForeground]);
 		PassParameters->RWDepth                             = GraphBuilder.CreateUAV(Records[Depth]);
 		PassParameters->SampleLocalPosition                 = SampleLocalPosition;
 		PassParameters->SampleCountDecay                    = 1.0f - Settings.EstimatorDecay;
 		PassParameters->CreaseHistoryDepthThreshold         = Settings.CreaseHistoryDepthThreshold;
 		PassParameters->SilhouetteHistoryDepthThreshold     = Settings.SilhouetteHistoryDepthThreshold;
-		PassParameters->SilhouetteHistoryCosAngle           = FMath::Cos(FMath::DegreesToRadians(Settings.SilhouetteHistoryViewAngle));
+		PassParameters->SilhouetteHistorySinAngle           = FMath::Sin(FMath::DegreesToRadians(Settings.SilhouetteHistoryViewAngle));
 		PassParameters->SilhouetteCreaseTakeoverSampleCount = Settings.SilhouetteCreaseTakeoverSampleCount;
 		PassParameters->bHistoryValid                       = bHistoryValid ? 1 : 0;
 		PassParameters->HistoryReprojectionMode             = static_cast<uint32>(Settings.HistoryReprojection);
@@ -291,7 +308,7 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->HorizontalB                 = Records[HorizontalB];
 		PassParameters->VerticalA                   = Records[VerticalA];
 		PassParameters->VerticalB                   = Records[VerticalB];
-		PassParameters->SilhouetteKept              = Records[SilhouetteKept];
+		PassParameters->SilhouetteForeground        = Records[SilhouetteForeground];
 		PassParameters->RWForegroundDeviceZ         = GraphBuilder.CreateUAV(ForegroundDeviceZ);
 		PassParameters->RWForegroundVelocity        = GraphBuilder.CreateUAV(ForegroundVelocity);
 		PassParameters->CreaseColor                 = FVector3f(Settings.CreaseColor.R, Settings.CreaseColor.G, Settings.CreaseColor.B);
