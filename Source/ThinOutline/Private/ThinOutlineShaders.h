@@ -31,6 +31,10 @@ public:
 
 	static constexpr int32 ThreadGroupSize = 8;
 
+	// r.ThinOutline.Silhouette.HistorySurfaceTurn: the silhouette view-angle test relative to the surface's own turn.
+	class FSurfaceTurnDim : SHADER_PERMUTATION_BOOL("SURFACE_TURN");
+	using FPermutationDomain = TShaderPermutationDomain<FSurfaceTurnDim>;
+
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
 		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSceneTextureUniformParameters, SceneTexturesStruct)

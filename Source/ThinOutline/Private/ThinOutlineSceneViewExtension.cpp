@@ -91,6 +91,7 @@ void FThinOutlineSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& InV
 	Settings.SilhouetteThickness                 = FMath::Max(0.0f, CVarThinOutlineSilhouetteThickness.GetValueOnGameThread());
 	Settings.SilhouetteHistoryViewAngle          = FMath::Clamp(CVarThinOutlineSilhouetteHistoryViewAngle.GetValueOnGameThread(), 0.0f, 90.0f);
 	Settings.SilhouetteCreaseTakeoverSampleCount = FMath::Max(0.0f, CVarThinOutlineSilhouetteCreaseTakeoverSampleCount.GetValueOnGameThread());
+	Settings.bSilhouetteHistorySurfaceTurn       = CVarThinOutlineSilhouetteHistorySurfaceTurn.GetValueOnGameThread() != 0;
 	Settings.CreaseRidgeThreshold                = FMath::Max(0.0f, CVarThinOutlineCreaseRidgeThreshold.GetValueOnGameThread());
 	Settings.CreaseValleyThreshold               = FMath::Max(0.0f, CVarThinOutlineCreaseValleyThreshold.GetValueOnGameThread());
 	Settings.CreaseScale                         = FMath::Max(0.0f, CVarThinOutlineCreaseScale.GetValueOnGameThread());
@@ -249,7 +250,9 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->bHistoryValid                       = bHistoryValid ? 1 : 0;
 		PassParameters->HistoryReprojectionMode             = static_cast<uint32>(Settings.HistoryReprojection);
 
-		TShaderMapRef<FThinOutlineRecordCS> ComputeShader(GetGlobalShaderMap(View.GetFeatureLevel()));
+		FThinOutlineRecordCS::FPermutationDomain PermutationVector;
+		PermutationVector.Set<FThinOutlineRecordCS::FSurfaceTurnDim>(Settings.bSilhouetteHistorySurfaceTurn);
+		TShaderMapRef<FThinOutlineRecordCS> ComputeShader(GetGlobalShaderMap(View.GetFeatureLevel()), PermutationVector);
 
 		FComputeShaderUtils::AddPass(
 			GraphBuilder,

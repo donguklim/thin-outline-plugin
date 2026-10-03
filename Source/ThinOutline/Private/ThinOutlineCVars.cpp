@@ -79,6 +79,16 @@ TAutoConsoleVariable<float> CVarThinOutlineSilhouetteHistoryViewAngle(
 	ECVF_Default
 );
 
+TAutoConsoleVariable<int32> CVarThinOutlineSilhouetteHistorySurfaceTurn(
+	TEXT("r.ThinOutline.Silhouette.HistorySurfaceTurn"),
+	1,
+	TEXT("1 = the view angle of r.ThinOutline.Silhouette.HistoryViewAngle is measured relative to the surface inside the\n")
+	TEXT("contour, whose turn since the previous frame is tracked with the velocities of two of its pixels, so silhouettes of\n")
+	TEXT("objects turning in front of the camera are rejected too. 0 = the view direction's own turn only (cheaper: about\n")
+	TEXT("0.015 ms at 1280x720 on an RTX 5080, a separate shader permutation).\n"),
+	ECVF_Default
+);
+
 TAutoConsoleVariable<float> CVarThinOutlineSilhouetteCreaseTakeoverSampleCount(
 	TEXT("r.ThinOutline.Silhouette.CreaseTakeoverSampleCount"),
 	0.5f,
@@ -185,5 +195,13 @@ TAutoConsoleVariable<float> CVarThinOutlineDebugCameraOrbitDistance(
 	TEXT("r.ThinOutline.Debug.CameraOrbitDistance"),
 	400.0f,
 	TEXT("Debugging: distance in cm in front of the camera of the axis r.ThinOutline.Debug.CameraOrbit turns around.\n"),
+	ECVF_Cheat
+);
+
+TAutoConsoleVariable<float> CVarThinOutlineDebugPawnSpin(
+	TEXT("r.ThinOutline.Debug.PawnSpin"),
+	0.0f,
+	TEXT("Debugging: turns the first player's pawn in place around the vertical axis by this many more degrees every frame\n")
+	TEXT("(0 = off), to test silhouettes of an object turning in front of a still camera, e.g. offscreen captures.\n"),
 	ECVF_Cheat
 );

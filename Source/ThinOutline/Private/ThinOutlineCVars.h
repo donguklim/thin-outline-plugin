@@ -15,6 +15,7 @@ extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteScale;
 extern TAutoConsoleVariable<int32> CVarThinOutlineSilhouetteSymmetricMeasure;
 extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteThickness;
 extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteHistoryViewAngle;
+extern TAutoConsoleVariable<int32> CVarThinOutlineSilhouetteHistorySurfaceTurn;
 extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteHistoryDepthThreshold;
 extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteCreaseTakeoverSampleCount;
 
@@ -35,3 +36,4 @@ extern TAutoConsoleVariable<int32> CVarThinOutlineEstimatorHistoryReprojection;
 extern TAutoConsoleVariable<float> CVarThinOutlineDebugCameraPan;
 extern TAutoConsoleVariable<float> CVarThinOutlineDebugCameraOrbit;
 extern TAutoConsoleVariable<float> CVarThinOutlineDebugCameraOrbitDistance;
+extern TAutoConsoleVariable<float> CVarThinOutlineDebugPawnSpin;

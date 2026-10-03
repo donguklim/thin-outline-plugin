@@ -70,6 +70,14 @@ public:
 	float SilhouetteHistoryViewAngle;
 
 	/**
+	 * Measure the history view angle relative to the surface inside the contour, whose turn since the previous frame is tracked with the
+	 * velocities of two of its pixels, so silhouettes of objects turning in front of the camera are rejected too. Off: the view direction's
+	 * own turn only, which is cheaper (about 0.015 ms at 1280x720 on an RTX 5080).
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.HistorySurfaceTurn", DisplayName = "Silhouette History Follows Surface Turn"))
+	bool bSilhouetteHistorySurfaceTurn;
+
+	/**
 	 * Relative depth tolerance for keeping a reprojected silhouette record: its foreground depth (the mean depth of the foreground neighbours
 	 * of its samples) must match the depth of the pixel itself, or of one of the two pixels toward the record's foreground side, within this
 	 * fraction of the depth.

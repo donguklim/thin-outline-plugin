@@ -21,8 +21,8 @@
 	Silhouette records belong to the contour of the foreground next to the pixel, which the outline wraps around:
 	they move with the velocity of the nearest pixel around. A record is kept while its foreground is still in place
 	(the pixel itself or one of the two pixels toward the record's foreground side has the record's foreground depth),
-	and while the view direction has not turned out of the plane through the camera and the edge by too much (the
-	contour slides over the surface when it does).
+	and while the view direction has not turned out of the plane through the camera and the edge by too much, relative to
+	the surface, which may turn too (the contour slides over the surface when it does).
 	Sky pixels have silhouette records only.
 	Both reprojections run, each taking the history taps whose record on the axis has its type. Then the axis keeps the
 	record of one type (see UpdateAxisRecord).
@@ -262,6 +262,61 @@ bool IsForegroundInPlace(FThinOutlineRecord Record, float CenterDepth, float2 Fi
 	return any(abs(float3(CenterDepth, SideDepths) - Record.ForegroundDepth) <= Tolerance);
 }
 
+// Translated world position, in the previous frame, of the surface point a pixel samples: the pixel's velocity moves it
+// back on screen and in depth.
+float3 GetPrevTranslatedWorldPosition(int2 PixelPos, float DeviceZ)
+{
+	const float3 Velocity = GetPixelVelocity(PixelPos, DeviceZ);
+	const float2 PrevScreenPos = ViewportPosToScreenPos(PixelPos - int2(View.ViewRectMin.xy)) - Velocity.xy;
+	const float PrevDepth = ConvertFromDeviceZ(DeviceZ - Velocity.z);
+	return mul(float4(PrevScreenPos * PrevDepth, PrevDepth, 1.0), View.PrevScreenToTranslatedWorld).xyz;
+}
+
+// Last frame's view direction, turned along with the surface inside the contour since then, so that only the view's turn
+// relative to the surface is left: an object turning in front of a still camera slides its contour too. The surface's
+// turn is the rotation of the chord from the foreground pixel to the pixel one step further in, between where the
+// velocities put its two points last frame and where they are now: the same surface points in both frames, so neither
+// the jitter nor normal maps enter. A turn about the chord itself is lost, but near a contour the chord runs close to
+// the line of sight, and a turn about the line of sight does not slide the contour. Without a second point on the same
+// surface (parts one or two pixels thin) the view direction is returned unturned.
+float3 TurnWithSurface(float3 PrevViewDirection, int2 ForegroundPixelPos, int2 InwardStep)
+{
+	// Only objects that draw velocity move by themselves; static geometry does not turn.
+	BRANCH
+	if (SceneTexturesStruct.GBufferVelocityTexture.Load(int3(ClampToViewRect(ForegroundPixelPos), 0)).x <= 0.0)
+	{
+		return PrevViewDirection;
+	}
+
+	const FThinOutlineSample Foreground = LoadDepthSample(ForegroundPixelPos);
+	const FThinOutlineSample Inner = LoadDepthSample(ForegroundPixelPos + InwardStep);
+	const FThinOutlineSample Beyond = LoadDepthSample(ForegroundPixelPos + 2 * InwardStep);
+
+	// The inner pixel's surface, continued back to the foreground pixel, must pass through it (the silhouette measure
+	// from N's side).
+	const float Distance = GetDistanceFromLine(Foreground.TranslatedWorldPosition, Beyond, Inner);
+	BRANCH
+	if (Foreground.bIsSky || Inner.bIsSky || Distance < 0.0 || Distance > SilhouetteThreshold * Foreground.Depth)
+	{
+		return PrevViewDirection;
+	}
+
+	const float3 Chord = normalize(Inner.TranslatedWorldPosition - Foreground.TranslatedWorldPosition);
+	const float3 PrevChord = normalize(
+		GetPrevTranslatedWorldPosition(ClampToViewRect(ForegroundPixelPos + InwardStep), Inner.DeviceZ)
+		- GetPrevTranslatedWorldPosition(ClampToViewRect(ForegroundPixelPos), Foreground.DeviceZ));
+
+	// Rotation taking PrevChord to Chord (Rodrigues' formula with the unnormalized axis). A chord that turned by more than
+	// 120 degrees in a frame is not a surface turning.
+	const float3 Axis = cross(PrevChord, Chord);
+	const float CosAngle = dot(PrevChord, Chord);
+	if (CosAngle <= -0.5)
+	{
+		return PrevViewDirection;
+	}
+	return PrevViewDirection * CosAngle + cross(Axis, PrevViewDirection) + Axis * (dot(Axis, PrevViewDirection) / (1.0 + CosAngle));
+}
+
 // Whether the view direction turned out of the plane through the camera and the record's edge by more than the
 // threshold angle since the previous frame. At a smooth contour that plane is the surface's tangent plane: turning the
 // view direction within it moves the contour along itself, turning it out of it slides the contour over the surface.
@@ -277,6 +332,36 @@ bool HasViewLeftEdgePlane(FThinOutlineRecord Record, bool bVerticalAxis, float3 
 	const float3 RayStep = mul(float4(ScreenStep, 0.0, 0.0), View.ScreenToTranslatedWorld).xyz;
 	const float3 EdgePlaneNormal = normalize(cross(Ray, RayStep));
 	return abs(dot(EdgePlaneNormal, PrevViewDirection)) > SilhouetteHistorySinAngle;
+}
+
+// The view-angle test of one axis's reprojected silhouette record, relative to the surface (TurnWithSurface) when
+// SURFACE_TURN is set. Its foreground pixel is, of the pixel and the one and two pixels toward the record's foreground
+// side, the one whose depth is closest to the record's foreground depth. The side depths are as for IsForegroundInPlace.
+bool HasViewTurnedOffContour(
+	FThinOutlineRecord Record,
+	bool bVerticalAxis,
+	int2 PixelPos,
+	float CenterDepth,
+	float2 FirstSideDepths,
+	float2 SecondSideDepths,
+	float3 Ray,
+	float3 PrevViewDirection)
+{
+#if SURFACE_TURN
+	const bool bFirstSide = Record.KeptRatio >= 0.5;
+	const int2 AxisStep = bVerticalAxis ? int2(0, 1) : int2(1, 0);
+	const int2 InwardStep = bFirstSide ? -AxisStep : AxisStep;
+	const float2 SideDepths = bFirstSide ? FirstSideDepths : SecondSideDepths;
+	const float3 DepthErrors = abs(float3(CenterDepth, SideDepths) - Record.ForegroundDepth);
+	const int Steps = DepthErrors.x <= min(DepthErrors.y, DepthErrors.z) ? 0 : (DepthErrors.y <= DepthErrors.z ? 1 : 2);
+
+	const float3 RelativePrevViewDirection = TurnWithSurface(PrevViewDirection, PixelPos + Steps * InwardStep, InwardStep);
+	return HasViewLeftEdgePlane(Record, bVerticalAxis, Ray, RelativePrevViewDirection);
+#else
+	// r.ThinOutline.Silhouette.HistorySurfaceTurn 0: the view direction's own turn only. Any code here costs about 0.015 ms
+	// on the whole pass (it seems to push the pass over a register limit), hence a permutation.
+	return HasViewLeftEdgePlane(Record, bVerticalAxis, Ray, PrevViewDirection);
+#endif
 }
 
 // Fetches the previous frame's silhouette records of the foreground contour next to this pixel, moved into this
@@ -352,13 +437,25 @@ void ReprojectSilhouetteRecords(
 		const float3 Ray = mul(float4(ScreenPos, 1.0, 0.0), View.ScreenToTranslatedWorld).xyz;
 		const float3 PrevViewDirection = normalize(mul(float4(ScreenPos - Velocity.xy, 1.0, 0.0), View.PrevScreenToTranslatedWorld).xyz);
 
-		if (HorizontalRecord.SampleCount > 0.0 && HasViewLeftEdgePlane(HorizontalRecord, false, Ray, PrevViewDirection))
+		const int2 PixelPos = int2(View.ViewRectMin.xy) + ViewportPos;
+
+		BRANCH
+		if (HorizontalRecord.SampleCount > 0.0)
 		{
-			HorizontalRecord = GetEmptyRecord();
+			if (HasViewTurnedOffContour(HorizontalRecord, false, PixelPos, Center.Depth,
+				float2(Neighbours[0].Depth, FarNeighbours[0].Depth), float2(Neighbours[1].Depth, FarNeighbours[1].Depth), Ray, PrevViewDirection))
+			{
+				HorizontalRecord = GetEmptyRecord();
+			}
 		}
-		if (VerticalRecord.SampleCount > 0.0 && HasViewLeftEdgePlane(VerticalRecord, true, Ray, PrevViewDirection))
+		BRANCH
+		if (VerticalRecord.SampleCount > 0.0)
 		{
-			VerticalRecord = GetEmptyRecord();
+			if (HasViewTurnedOffContour(VerticalRecord, true, PixelPos, Center.Depth,
+				float2(Neighbours[2].Depth, FarNeighbours[2].Depth), float2(Neighbours[3].Depth, FarNeighbours[3].Depth), Ray, PrevViewDirection))
+			{
+				VerticalRecord = GetEmptyRecord();
+			}
 		}
 	}
 }
