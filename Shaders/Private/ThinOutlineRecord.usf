@@ -16,7 +16,7 @@
 	  DropRecordOutsideSamplingRange).
 
 	Crease records belong to the pixel's own surface: they move with its velocity and are kept while their depth
-	matches the surface around the pixel.
+	matches the pixel's.
 	Silhouette records belong to the contour of the foreground next to the pixel, which the outline wraps around:
 	they move with the foreground's velocity and are kept while their foreground depth matches, and while the
 	direction the foreground is seen from has not turned too far (the contour slides over the surface when it does).
@@ -53,8 +53,9 @@ RWTexture2D<float2> RWDepth;
 float2 SampleLocalPosition;
 // 1 - decay rate, applied to the sample counts once per frame.
 float SampleCountDecay;
-// Relative depth tolerance of the history depth tests.
-float HistoryDepthThreshold;
+// Relative depth tolerances of the history depth tests.
+float CreaseHistoryDepthThreshold;
+float SilhouetteHistoryDepthThreshold;
 // Cosine of the largest angle the view direction of a silhouette may turn by in one frame.
 float SilhouetteHistoryCosAngle;
 uint bHistoryValid;
@@ -158,8 +159,6 @@ bool ReprojectCreaseRecords(
 	int2 ViewportPos,
 	int2 PixelPos,
 	FThinOutlineSample Center,
-	FThinOutlineSample Neighbours[4],
-	FThinOutlineSample FarNeighbours[4],
 	out FThinOutlineRecord HorizontalRecord,
 	out FThinOutlineRecord VerticalRecord)
 {
@@ -169,25 +168,11 @@ bool ReprojectCreaseRecords(
 	const float3 Velocity = GetPixelVelocity(PixelPos, Center.DeviceZ);
 	const FThinOutlineHistoryTaps Taps = GetHistoryTaps(ViewportPosToScreenPos(ViewportPos), Velocity.xy);
 
-	// A history pixel sampled the depth at its own jittered position, about a pixel away from this one. Accept it
-	// within the depth range of this pixel's surface neighbourhood, which also covers the bend across a crease.
-	float MinDepth = Center.Depth;
-	float MaxDepth = Center.Depth;
-	UNROLL
-	for (uint Index = 0; Index < 4; ++Index)
-	{
-		const FThinOutlineSample Neighbour = Neighbours[Index];
-		if (!Neighbour.bIsSky && GetDepthEdgeMeasure(Center, Neighbour, Neighbours[Index ^ 1], FarNeighbours[Index]) <= SilhouetteThreshold)
-		{
-			MinDepth = min(MinDepth, Neighbour.Depth);
-			MaxDepth = max(MaxDepth, Neighbour.Depth);
-		}
-	}
-
-	// Expected depth of this surface in the previous frame.
+	// Expected depth of this surface in the previous frame. A crease lies on a depth-continuous surface, so a history
+	// pixel of the same surface only differs by the depth change across the jitter, up to about a pixel's step, which
+	// the threshold has to cover on surfaces seen at a grazing angle.
 	const float PrevDepth = ConvertFromDeviceZ(Center.DeviceZ - Velocity.z);
-	const float DepthShift = PrevDepth - Center.Depth;
-	const float Tolerance = HistoryDepthThreshold * PrevDepth;
+	const float Tolerance = CreaseHistoryDepthThreshold * PrevDepth;
 
 	bool bAnyTap = false;
 	UNROLL
@@ -199,7 +184,7 @@ bool ReprojectCreaseRecords(
 		if (Taps.Weights[Index] > 0.0)
 		{
 			const float StoredDepth = HistoryDepth.Load(Texel).x;
-			if (StoredDepth >= MinDepth + DepthShift - Tolerance && StoredDepth <= MaxDepth + DepthShift + Tolerance)
+			if (abs(StoredDepth - PrevDepth) <= Tolerance)
 			{
 				bAnyTap = true;
 				AddHistoryRecord(HorizontalRecord, UnpackRecord(HistoryCreaseHorizontalA.Load(Texel), HistoryCreaseHorizontalB.Load(Texel)), Taps.Offsets[Index].xy, Taps.Weights[Index]);
@@ -308,7 +293,7 @@ bool ReprojectSilhouetteRecords(
 	// The history stored the depth of its foreground. Expected depth range of this foreground in the previous frame:
 	const float PrevDepth = ConvertFromDeviceZ(Foreground.DeviceZ - Velocity.z);
 	const float DepthShift = PrevDepth - Foreground.Depth;
-	const float Tolerance = HistoryDepthThreshold * PrevDepth;
+	const float Tolerance = SilhouetteHistoryDepthThreshold * PrevDepth;
 
 	const FThinOutlineHistoryTaps Taps = GetHistoryTaps(ScreenPos, Velocity.xy);
 
@@ -391,7 +376,7 @@ void MainCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 	{
 		if (bHistoryValid != 0)
 		{
-			ReprojectCreaseRecords(ViewportPos, PixelPos, Center, Neighbours, FarNeighbours, CreaseHorizontal, CreaseVertical);
+			ReprojectCreaseRecords(ViewportPos, PixelPos, Center, CreaseHorizontal, CreaseVertical);
 			DropRecordOutsideSamplingRange(CreaseHorizontal);
 			DropRecordOutsideSamplingRange(CreaseVertical);
 		}

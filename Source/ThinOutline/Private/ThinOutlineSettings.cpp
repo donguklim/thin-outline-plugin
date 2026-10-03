@@ -18,14 +18,15 @@ UThinOutlineSettings::UThinOutlineSettings(const FObjectInitializer& ObjectIniti
 	bSilhouetteSymmetricMeasure = true;
 	SilhouetteThickness = 1.0f;
 	SilhouetteHistoryViewAngle = 5.0f;
+	SilhouetteHistoryDepthThreshold = 0.02f;
 	CreaseColor = FLinearColor::Black;
 	CreaseRidgeThreshold = 0.25f;
 	CreaseValleyThreshold = 0.25f;
 	CreaseScale = 4.0f;
 	CreaseThickness = 1.0f;
+	CreaseHistoryDepthThreshold = 0.05f;
 	EstimatorDecay = 0.04f;
 	CoTriggerThreshold = 0.05f;
 	SlopeStandardErrorThreshold = 0.05f;
-	HistoryDepthThreshold = 0.02f;
 	HistoryReprojection = 3;
 }

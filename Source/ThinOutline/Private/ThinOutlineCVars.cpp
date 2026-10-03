@@ -52,6 +52,15 @@ TAutoConsoleVariable<int32> CVarThinOutlineSilhouetteSymmetricMeasure(
 	ECVF_Default
 );
 
+TAutoConsoleVariable<float> CVarThinOutlineSilhouetteHistoryDepthThreshold(
+	TEXT("r.ThinOutline.Silhouette.HistoryDepthThreshold"),
+	0.02f,
+	TEXT("Relative depth tolerance for keeping a reprojected silhouette record: its foreground depth must lie within the depth\n")
+	TEXT("range of the current foreground's surface (the foreground pixel and its axial neighbours on the same surface),\n")
+	TEXT("widened by this fraction of the depth.\n"),
+	ECVF_Default
+);
+
 TAutoConsoleVariable<float> CVarThinOutlineSilhouetteThickness(
 	TEXT("r.ThinOutline.Silhouette.Thickness"),
 	1.0f,
@@ -98,6 +107,15 @@ TAutoConsoleVariable<float> CVarThinOutlineCreaseThickness(
 	ECVF_Default
 );
 
+TAutoConsoleVariable<float> CVarThinOutlineCreaseHistoryDepthThreshold(
+	TEXT("r.ThinOutline.Crease.HistoryDepthThreshold"),
+	0.05f,
+	TEXT("Relative depth tolerance for keeping a reprojected crease record: its depth must be within this fraction of the\n")
+	TEXT("pixel's depth, moved to the previous frame. The jitter moves the samples by up to a pixel, so it has to cover a\n")
+	TEXT("pixel's depth step on surfaces seen at a grazing angle, which grows as the screen percentage drops.\n"),
+	ECVF_Default
+);
+
 TAutoConsoleVariable<float> CVarThinOutlineEstimatorDecay(
 	TEXT("r.ThinOutline.Estimator.Decay"),
 	0.04f,
@@ -119,15 +137,6 @@ TAutoConsoleVariable<float> CVarThinOutlineEstimatorSlopeSEThreshold(
 	0.05f,
 	TEXT("When a pixel has both a horizontal- and a vertical-inducer edge, the one with the smaller slope standard error\n")
 	TEXT("is drawn if the two differ by more than this. Otherwise the one with the smaller absolute slope is drawn.\n"),
-	ECVF_Default
-);
-
-TAutoConsoleVariable<float> CVarThinOutlineEstimatorHistoryDepthThreshold(
-	TEXT("r.ThinOutline.Estimator.HistoryDepthThreshold"),
-	0.02f,
-	TEXT("Relative depth tolerance for keeping a reprojected edge record. A crease record is kept if its depth lies within the\n")
-	TEXT("depth range of the pixel's surface neighbourhood, widened by this fraction of the depth. A silhouette record is kept\n")
-	TEXT("if its foreground depth is within this fraction of the current foreground depth.\n"),
 	ECVF_Default
 );
 

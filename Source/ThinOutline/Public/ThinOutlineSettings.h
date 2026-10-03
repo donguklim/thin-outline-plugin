@@ -68,6 +68,13 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.HistoryViewAngle", ClampMin = "0.0", UIMax = "30.0", Units = "Degrees"))
 	float SilhouetteHistoryViewAngle;
 
+	/**
+	 * Relative depth tolerance for keeping a reprojected silhouette record: its foreground depth must lie within the depth range of the
+	 * current foreground's surface (the foreground pixel and its axial neighbours on the same surface), widened by this fraction of the depth.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.HistoryDepthThreshold", ClampMin = "0.0", UIMax = "0.2"))
+	float SilhouetteHistoryDepthThreshold;
+
 	/** Crease outline color. Written into pre-exposed HDR scene color, so it does not depend on exposure, but it is still tonemapped. */
 	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (HideAlphaChannel))
 	FLinearColor CreaseColor;
@@ -92,6 +99,14 @@ public:
 	float CreaseThickness;
 
 	/**
+	 * Relative depth tolerance for keeping a reprojected crease record: its depth must be within this fraction of the pixel's depth, moved
+	 * to the previous frame. The jitter moves the samples by up to a pixel, so it has to cover a pixel's depth step on surfaces seen at a
+	 * grazing angle, which grows as the screen percentage drops.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.HistoryDepthThreshold", ClampMin = "0.0", UIMax = "0.2"))
+	float CreaseHistoryDepthThreshold;
+
+	/**
 	 * Decay rate d of the edge records' running statistics. Samples are weighted by (1 - d)^age in frames, so a record that gets
 	 * a sample every frame holds about 1 / d samples. Lower is steadier, higher follows changes faster.
 	 */
@@ -111,14 +126,6 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Estimator", meta = (ConsoleVariable = "r.ThinOutline.Estimator.SlopeSEThreshold", ClampMin = "0.0", UIMax = "1.0"))
 	float SlopeStandardErrorThreshold;
-
-	/**
-	 * Relative depth tolerance for keeping a reprojected edge record. A crease record is kept if its depth lies within the depth range
-	 * of the pixel's surface neighbourhood, widened by this fraction of the depth. A silhouette record is kept if its foreground depth
-	 * is within this fraction of the current foreground depth.
-	 */
-	UPROPERTY(config, EditAnywhere, Category = "Estimator", meta = (ConsoleVariable = "r.ThinOutline.Estimator.HistoryDepthThreshold", ClampMin = "0.0", UIMax = "0.2"))
-	float HistoryDepthThreshold;
 
 	/**
 	 * How the previous frame's edge records are fetched at the reprojected position. 0 = nearest history pixel (records slip past a

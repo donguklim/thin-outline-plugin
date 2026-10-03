@@ -15,18 +15,19 @@ extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteScale;
 extern TAutoConsoleVariable<int32> CVarThinOutlineSilhouetteSymmetricMeasure;
 extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteThickness;
 extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteHistoryViewAngle;
+extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteHistoryDepthThreshold;
 
 // Crease (normal discontinuity)
 extern TAutoConsoleVariable<float> CVarThinOutlineCreaseRidgeThreshold;
 extern TAutoConsoleVariable<float> CVarThinOutlineCreaseValleyThreshold;
 extern TAutoConsoleVariable<float> CVarThinOutlineCreaseScale;
 extern TAutoConsoleVariable<float> CVarThinOutlineCreaseThickness;
+extern TAutoConsoleVariable<float> CVarThinOutlineCreaseHistoryDepthThreshold;
 
 // Temporal edge estimator (per-pixel OLS edge records)
 extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorDecay;
 extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorCoTriggerThreshold;
 extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorSlopeSEThreshold;
-extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorHistoryDepthThreshold;
 extern TAutoConsoleVariable<int32> CVarThinOutlineEstimatorHistoryReprojection;
 
 // Debugging
