@@ -15,6 +15,7 @@
 BEGIN_SHADER_PARAMETER_STRUCT(FThinOutlineEdgeCheckParameters, )
 	SHADER_PARAMETER(float, SilhouetteThreshold)
 	SHADER_PARAMETER(float, SilhouetteScale)
+	SHADER_PARAMETER(uint32, bSymmetricDepthMeasure)
 	SHADER_PARAMETER(float, CreaseRidgeThreshold)
 	SHADER_PARAMETER(float, CreaseValleyThreshold)
 	SHADER_PARAMETER(float, CreaseScale)

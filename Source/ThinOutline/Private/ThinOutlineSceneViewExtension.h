@@ -16,6 +16,7 @@ struct FThinOutlineRenderSettings
 	FLinearColor CreaseColor = FLinearColor::Black;
 	float SilhouetteThreshold = 0.0f;
 	float SilhouetteScale = 0.0f;
+	bool bSilhouetteSymmetricMeasure = true;
 	float SilhouetteThickness = 0.0f;
 	float SilhouetteHistoryViewAngle = 0.0f;
 	float CreaseRidgeThreshold = 0.0f;

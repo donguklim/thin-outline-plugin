@@ -89,6 +89,7 @@ bool ReprojectCreaseRecords(
 	int2 PixelPos,
 	FThinOutlineSample Center,
 	FThinOutlineSample Neighbours[4],
+	FThinOutlineSample FarNeighbours[4],
 	out FThinOutlineRecord HorizontalRecord,
 	out FThinOutlineRecord VerticalRecord)
 {
@@ -112,7 +113,7 @@ bool ReprojectCreaseRecords(
 	for (uint Index = 0; Index < 4; ++Index)
 	{
 		const FThinOutlineSample Neighbour = Neighbours[Index];
-		if (!Neighbour.bIsSky && GetDepthEdgeMeasure(Center, Neighbour, Neighbours[Index ^ 1]) <= SilhouetteThreshold)
+		if (!Neighbour.bIsSky && GetDepthEdgeMeasure(Center, Neighbour, Neighbours[Index ^ 1], FarNeighbours[Index]) <= SilhouetteThreshold)
 		{
 			MinDepth = min(MinDepth, Neighbour.Depth);
 			MaxDepth = max(MaxDepth, Neighbour.Depth);
@@ -154,7 +155,7 @@ struct FThinOutlineForeground
 	float MaxDepth;
 };
 
-FThinOutlineForeground FindForeground(int2 PixelPos, FThinOutlineSample Center, FThinOutlineSample Neighbours[4])
+FThinOutlineForeground FindForeground(int2 PixelPos, FThinOutlineSample Center, FThinOutlineSample Neighbours[4], FThinOutlineSample FarNeighbours[4])
 {
 	FThinOutlineForeground Foreground;
 	Foreground.PixelPos = PixelPos;
@@ -169,13 +170,10 @@ FThinOutlineForeground FindForeground(int2 PixelPos, FThinOutlineSample Center, 
 			Foreground.PixelPos = ClampToViewRect(PixelPos + NeighbourOffsets[Index]);
 			Foreground.DeviceZ = Neighbours[Index].DeviceZ;
 		}
-
-		const int2 FarPixelPos = ClampToViewRect(PixelPos + 2 * NeighbourOffsets[Index]);
-		const float FarDeviceZ = LoadDeviceZ(FarPixelPos);
-		if (FarDeviceZ > Foreground.DeviceZ)
+		if (FarNeighbours[Index].DeviceZ > Foreground.DeviceZ)
 		{
-			Foreground.PixelPos = FarPixelPos;
-			Foreground.DeviceZ = FarDeviceZ;
+			Foreground.PixelPos = ClampToViewRect(PixelPos + 2 * NeighbourOffsets[Index]);
+			Foreground.DeviceZ = FarNeighbours[Index].DeviceZ;
 		}
 	}
 
@@ -188,16 +186,18 @@ FThinOutlineForeground FindForeground(int2 PixelPos, FThinOutlineSample Center, 
 	{
 		const FThinOutlineSample ForegroundSample = LoadDepthSample(Foreground.PixelPos);
 		FThinOutlineSample ForegroundNeighbours[4];
+		FThinOutlineSample ForegroundFarNeighbours[4];
 		UNROLL
 		for (uint Index = 0; Index < 4; ++Index)
 		{
 			ForegroundNeighbours[Index] = LoadDepthSample(Foreground.PixelPos + NeighbourOffsets[Index]);
+			ForegroundFarNeighbours[Index] = LoadDepthSample(Foreground.PixelPos + 2 * NeighbourOffsets[Index]);
 		}
 
 		UNROLL
 		for (uint Index = 0; Index < 4; ++Index)
 		{
-			if (GetDepthEdgeMeasure(ForegroundSample, ForegroundNeighbours[Index], ForegroundNeighbours[Index ^ 1]) <= SilhouetteThreshold)
+			if (GetDepthEdgeMeasure(ForegroundSample, ForegroundNeighbours[Index], ForegroundNeighbours[Index ^ 1], ForegroundFarNeighbours[Index]) <= SilhouetteThreshold)
 			{
 				Foreground.MinDepth = min(Foreground.MinDepth, ForegroundNeighbours[Index].Depth);
 				Foreground.MaxDepth = max(Foreground.MaxDepth, ForegroundNeighbours[Index].Depth);
@@ -304,9 +304,10 @@ void MainCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 
 	FThinOutlineSample Center;
 	FThinOutlineSample Neighbours[4];
-	LoadOutlineNeighbourhood(PixelPos, Center, Neighbours);
+	FThinOutlineSample FarNeighbours[4];
+	LoadOutlineNeighbourhood(PixelPos, Center, Neighbours, FarNeighbours);
 
-	const FThinOutlineEdges Edges = DetectEdges(Center, Neighbours);
+	const FThinOutlineEdges Edges = DetectEdges(Center, Neighbours, FarNeighbours);
 
 	// Creases. Sky has no surface to keep a record for.
 	FThinOutlineRecord CreaseHorizontal = GetEmptyRecord();
@@ -316,7 +317,7 @@ void MainCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 	{
 		if (bHistoryValid != 0)
 		{
-			ReprojectCreaseRecords(ViewportPos, PixelPos, Center, Neighbours, CreaseHorizontal, CreaseVertical);
+			ReprojectCreaseRecords(ViewportPos, PixelPos, Center, Neighbours, FarNeighbours, CreaseHorizontal, CreaseVertical);
 		}
 
 		CreaseHorizontal.SampleCount *= SampleCountDecay;
@@ -330,7 +331,7 @@ void MainCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 	}
 
 	// Silhouettes, also on sky pixels, which are the background of a silhouette against the sky.
-	const FThinOutlineForeground Foreground = FindForeground(PixelPos, Center, Neighbours);
+	const FThinOutlineForeground Foreground = FindForeground(PixelPos, Center, Neighbours, FarNeighbours);
 
 	FThinOutlineRecord SilhouetteHorizontal = GetEmptyRecord();
 	FThinOutlineRecord SilhouetteVertical = GetEmptyRecord();

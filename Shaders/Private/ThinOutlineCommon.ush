@@ -3,15 +3,19 @@
 /*=============================================================================
 	ThinOutlineCommon.ush: G-buffer edge checks and the temporal OLS edge records shared by the ThinOutline passes.
 
-	Edge checks, for a target pixel C, each axial neighbour N (left, right, top, bottom) and O, the pixel on the
-	opposite side of C:
+	Edge checks, for a target pixel C, each axial neighbour N (left, right, top, bottom), O, the pixel on the
+	opposite side of C, and F, the pixel beyond N:
 
 	Silhouette (world positions P of the pixels' samples, linear depth D, i.e. distance from the camera plane):
-		Measure = distance of P_N from the line through P_O and P_C / D_C
-		O, C and N lie on one screen axis, so on a plane they lie on one line in the world whatever the viewing angle: a
-		surface seen at a grazing angle needs a larger depth step than a facing one to count as a silhouette.
+		Measure = min(distance of P_N from the line through P_O and P_C,
+		              distance of P_C from the line through P_F and P_N) / D_C
+		O, C, N and F lie on one screen axis, so on a plane they lie on one line in the world whatever the viewing angle:
+		a surface seen at a grazing angle needs a larger depth step than a facing one to count as a silhouette.
+		The second term (r.ThinOutline.Silhouette.SymmetricMeasure) continues N's surface back to C: where it passes
+		through C, the two surfaces meet (a wall standing on a floor seen at a grazing angle) instead of N's hiding C's.
 		No measure (0) when O is sky (C is then the foreground of a silhouette toward O, which says nothing about N) or
-		when O is C itself (clamped at the view rect border).
+		when O is C itself (clamped at the view rect border). Without F (sky, or N itself at the border) only the first
+		term counts.
 		Only counted on the background pixel (C farther than N), so a check fires toward the foreground.
 		A sky pixel (no depth) is a full silhouette toward every non-sky axial neighbour.
 		The same measure, with the silhouette threshold, decides everywhere else whether two pixels are on one surface.
@@ -43,6 +47,8 @@
 
 float SilhouetteThreshold;
 float SilhouetteScale;
+// Whether the depth edge measure also continues N's surface back to C (see above).
+uint bSymmetricDepthMeasure;
 float CreaseRidgeThreshold;
 float CreaseValleyThreshold;
 float CreaseScale;
@@ -138,8 +144,13 @@ FThinOutlineSample LoadOutlineSample(int2 PixelPos)
 	return Sample;
 }
 
-// Loads the target pixel and its axial neighbours (clamped to the view rect) in NeighbourOffsets order.
-void LoadOutlineNeighbourhood(int2 PixelPos, out FThinOutlineSample Center, out FThinOutlineSample Neighbours[4])
+// Loads the target pixel and its axial neighbours (clamped to the view rect) in NeighbourOffsets order, and the depth
+// samples of the pixels two steps away (the pixel beyond each neighbour).
+void LoadOutlineNeighbourhood(
+	int2 PixelPos,
+	out FThinOutlineSample Center,
+	out FThinOutlineSample Neighbours[4],
+	out FThinOutlineSample FarNeighbours[4])
 {
 	Center = LoadOutlineSample(PixelPos);
 
@@ -147,29 +158,48 @@ void LoadOutlineNeighbourhood(int2 PixelPos, out FThinOutlineSample Center, out 
 	for (uint NeighbourIndex = 0; NeighbourIndex < 4; ++NeighbourIndex)
 	{
 		Neighbours[NeighbourIndex] = LoadOutlineSample(PixelPos + NeighbourOffsets[NeighbourIndex]);
+		FarNeighbours[NeighbourIndex] = LoadDepthSample(PixelPos + 2 * NeighbourOffsets[NeighbourIndex]);
 	}
 }
 
-// Depth discontinuity between the target C and its neighbour N, O being the pixel on the other side of C: the distance
-// of N from the line through O and C, relative to C's depth. Not defined for a sky C.
-float GetDepthEdgeMeasure(FThinOutlineSample C, FThinOutlineSample N, FThinOutlineSample O)
+// Distance of Position from the line through the samples A and B, or -1 when there is no line: A is sky, or A is B
+// itself (clamped at the view rect border).
+float GetDistanceFromLine(float3 Position, FThinOutlineSample A, FThinOutlineSample B)
+{
+	const float3 LineDirection = B.TranslatedWorldPosition - A.TranslatedWorldPosition;
+	const float LineLengthSquared = dot(LineDirection, LineDirection);
+	if (A.bIsSky || LineLengthSquared <= 0.0)
+	{
+		return -1.0;
+	}
+	return length(cross(Position - B.TranslatedWorldPosition, LineDirection)) * rsqrt(LineLengthSquared);
+}
+
+// Depth discontinuity between the target C and its neighbour N, with O the pixel on the other side of C and F the pixel
+// beyond N, relative to C's depth (see the top of the file). Not defined for a sky C.
+float GetDepthEdgeMeasure(FThinOutlineSample C, FThinOutlineSample N, FThinOutlineSample O, FThinOutlineSample F)
 {
 	if (N.bIsSky)
 	{
 		return THIN_OUTLINE_FAR_DEPTH;
 	}
 
-	// Without O there is no line: a sky O makes C the foreground of a silhouette toward O, which says nothing about N,
-	// and a clamped O at the view rect border is C itself.
-	const float3 LineDirection = C.TranslatedWorldPosition - O.TranslatedWorldPosition;
-	const float LineLengthSquared = dot(LineDirection, LineDirection);
-	if (O.bIsSky || LineLengthSquared <= 0.0)
+	// A sky O makes C the foreground of a silhouette toward O, which says nothing about N.
+	float Distance = GetDistanceFromLine(N.TranslatedWorldPosition, O, C);
+	if (Distance < 0.0)
 	{
 		return 0.0;
 	}
 
-	const float3 Offset = N.TranslatedWorldPosition - C.TranslatedWorldPosition;
-	return length(cross(Offset, LineDirection)) * rsqrt(LineLengthSquared) / C.Depth;
+	if (bSymmetricDepthMeasure != 0)
+	{
+		const float DistanceFromNSide = GetDistanceFromLine(C.TranslatedWorldPosition, F, N);
+		if (DistanceFromNSide >= 0.0)
+		{
+			Distance = min(Distance, DistanceFromNSide);
+		}
+	}
+	return Distance / C.Depth;
 }
 
 // Normal discontinuity between the target C and the neighbour N, extrapolating the normal rotation from O through C.
@@ -185,9 +215,9 @@ float GetEdgeStrength(float Measure, float Threshold, float Scale)
 	return Measure > Threshold ? saturate((Measure - Threshold) * Scale) : 0.0;
 }
 
-// Silhouette strength of the check of C toward N (O on the other side of C). Silhouettes belong to the background side
-// only: C must be farther than N. A sky pixel next to geometry is always a silhouette.
-float GetSilhouetteStrength(FThinOutlineSample C, FThinOutlineSample N, FThinOutlineSample O)
+// Silhouette strength of the check of C toward N (O on the other side of C, F beyond N). Silhouettes belong to the
+// background side only: C must be farther than N. A sky pixel next to geometry is always a silhouette.
+float GetSilhouetteStrength(FThinOutlineSample C, FThinOutlineSample N, FThinOutlineSample O, FThinOutlineSample F)
 {
 	if (C.bIsSky)
 	{
@@ -195,7 +225,7 @@ float GetSilhouetteStrength(FThinOutlineSample C, FThinOutlineSample N, FThinOut
 	}
 	if (C.Depth > N.Depth)
 	{
-		return GetEdgeStrength(GetDepthEdgeMeasure(C, N, O), SilhouetteThreshold, SilhouetteScale);
+		return GetEdgeStrength(GetDepthEdgeMeasure(C, N, O, F), SilhouetteThreshold, SilhouetteScale);
 	}
 	return 0.0;
 }
@@ -212,7 +242,8 @@ struct FThinOutlineEdges
 	bool bRidge[4];
 };
 
-FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neighbours[4])
+// See LoadOutlineNeighbourhood for the arguments.
+FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neighbours[4], FThinOutlineSample FarNeighbours[4])
 {
 	FThinOutlineEdges Edges;
 	Edges.MaxSilhouette = 0.0;
@@ -220,7 +251,7 @@ FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neig
 	UNROLL
 	for (uint Index = 0; Index < 4; ++Index)
 	{
-		Edges.Silhouette[Index] = GetSilhouetteStrength(Center, Neighbours[Index], Neighbours[Index ^ 1]);
+		Edges.Silhouette[Index] = GetSilhouetteStrength(Center, Neighbours[Index], Neighbours[Index ^ 1], FarNeighbours[Index]);
 		Edges.MaxSilhouette = max(Edges.MaxSilhouette, Edges.Silhouette[Index]);
 	}
 
@@ -236,11 +267,12 @@ FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neig
 		// Silhouettes take priority: a pixel with a silhouette is not a crease candidate.
 		// Creases only exist between pixels of a depth-continuous surface. This also keeps the foreground side
 		// of a silhouette (which has no silhouette strength itself) free of creases.
-		if (Edges.MaxSilhouette <= 0.0 && Center.bHasNormal && Neighbour.bHasNormal && GetDepthEdgeMeasure(Center, Neighbour, Opposite) <= SilhouetteThreshold)
+		if (Edges.MaxSilhouette <= 0.0 && Center.bHasNormal && Neighbour.bHasNormal
+			&& GetDepthEdgeMeasure(Center, Neighbour, Opposite, FarNeighbours[Index]) <= SilhouetteThreshold)
 		{
 			// If the opposite pixel is not on the same surface, there is no normal rotation to extrapolate.
 			const bool bOppositeOnSurface = Opposite.bHasNormal
-				&& GetDepthEdgeMeasure(Center, Opposite, Neighbour) <= SilhouetteThreshold;
+				&& GetDepthEdgeMeasure(Center, Opposite, Neighbour, FarNeighbours[Index ^ 1]) <= SilhouetteThreshold;
 			const float3 OppositeNormal = bOppositeOnSurface ? Opposite.WorldNormal : Center.WorldNormal;
 
 			const float CreaseMeasure = GetCreaseEdgeMeasure(Center.WorldNormal, Neighbour.WorldNormal, OppositeNormal);

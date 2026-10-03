@@ -12,6 +12,7 @@ extern TAutoConsoleVariable<int32> CVarThinOutlineDebugView;
 // Silhouette (depth discontinuity)
 extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteThreshold;
 extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteScale;
+extern TAutoConsoleVariable<int32> CVarThinOutlineSilhouetteSymmetricMeasure;
 extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteThickness;
 extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteHistoryViewAngle;
 

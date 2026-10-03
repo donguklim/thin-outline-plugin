@@ -259,20 +259,21 @@ void MainPS(
 
 			FThinOutlineSample Previous = LoadDepthSample(PixelPos - ForegroundStep);
 			FThinOutlineSample Current = LoadDepthSample(PixelPos);
+			FThinOutlineSample Next = LoadDepthSample(PixelPos + ForegroundStep);
 			bool bFound = false;
 			UNROLL
 			for (int Distance = 1; Distance <= 2; ++Distance)
 			{
-				const int2 NextPos = ClampToViewRect(PixelPos + Distance * ForegroundStep);
-				const FThinOutlineSample Next = LoadDepthSample(NextPos);
-				if (!bFound && GetSilhouetteStrength(Current, Next, Previous) > 0.0)
+				const FThinOutlineSample Beyond = LoadDepthSample(PixelPos + (Distance + 1) * ForegroundStep);
+				if (!bFound && GetSilhouetteStrength(Current, Next, Previous, Beyond) > 0.0)
 				{
 					bFound = true;
 					ForegroundDeviceZ = Next.DeviceZ;
-					ForegroundVelocity = SceneTexturesStruct.GBufferVelocityTexture.Load(int3(NextPos, 0));
+					ForegroundVelocity = SceneTexturesStruct.GBufferVelocityTexture.Load(int3(ClampToViewRect(PixelPos + Distance * ForegroundStep), 0));
 				}
 				Previous = Current;
 				Current = Next;
+				Next = Beyond;
 			}
 		}
 	}
@@ -285,8 +286,9 @@ void MainPS(
 	{
 		FThinOutlineSample Center;
 		FThinOutlineSample Neighbours[4];
-		LoadOutlineNeighbourhood(PixelPos, Center, Neighbours);
-		const FThinOutlineEdges Edges = DetectEdges(Center, Neighbours);
+		FThinOutlineSample FarNeighbours[4];
+		LoadOutlineNeighbourhood(PixelPos, Center, Neighbours, FarNeighbours);
+		const FThinOutlineEdges Edges = DetectEdges(Center, Neighbours, FarNeighbours);
 
 		float Ridge = 0.0;
 		float Valley = 0.0;

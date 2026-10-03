@@ -59,6 +59,7 @@ void FThinOutlineSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& InV
 	Settings.CreaseColor                     = GetDefault<UThinOutlineSettings>()->CreaseColor;
 	Settings.SilhouetteThreshold             = FMath::Max(0.0f, CVarThinOutlineSilhouetteThreshold.GetValueOnGameThread());
 	Settings.SilhouetteScale                 = FMath::Max(0.0f, CVarThinOutlineSilhouetteScale.GetValueOnGameThread());
+	Settings.bSilhouetteSymmetricMeasure     = CVarThinOutlineSilhouetteSymmetricMeasure.GetValueOnGameThread() != 0;
 	Settings.SilhouetteThickness             = FMath::Max(0.0f, CVarThinOutlineSilhouetteThickness.GetValueOnGameThread());
 	Settings.SilhouetteHistoryViewAngle      = FMath::Clamp(CVarThinOutlineSilhouetteHistoryViewAngle.GetValueOnGameThread(), 0.0f, 180.0f);
 	Settings.CreaseRidgeThreshold            = FMath::Max(0.0f, CVarThinOutlineCreaseRidgeThreshold.GetValueOnGameThread());
@@ -157,11 +158,12 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 	RDG_EVENT_SCOPE_STAT(GraphBuilder, ThinOutline, "ThinOutline %dx%d", ViewSize.X, ViewSize.Y);
 
 	FThinOutlineEdgeCheckParameters EdgeCheck;
-	EdgeCheck.SilhouetteThreshold   = Settings.SilhouetteThreshold;
-	EdgeCheck.SilhouetteScale       = Settings.SilhouetteScale;
-	EdgeCheck.CreaseRidgeThreshold  = Settings.CreaseRidgeThreshold;
-	EdgeCheck.CreaseValleyThreshold = Settings.CreaseValleyThreshold;
-	EdgeCheck.CreaseScale           = Settings.CreaseScale;
+	EdgeCheck.SilhouetteThreshold    = Settings.SilhouetteThreshold;
+	EdgeCheck.SilhouetteScale        = Settings.SilhouetteScale;
+	EdgeCheck.bSymmetricDepthMeasure = Settings.bSilhouetteSymmetricMeasure ? 1 : 0;
+	EdgeCheck.CreaseRidgeThreshold   = Settings.CreaseRidgeThreshold;
+	EdgeCheck.CreaseValleyThreshold  = Settings.CreaseValleyThreshold;
+	EdgeCheck.CreaseScale            = Settings.CreaseScale;
 
 	// The projection jitter moves the scene by TemporalJitterPixels, so every pixel samples the G-buffer at its
 	// center minus the jitter.

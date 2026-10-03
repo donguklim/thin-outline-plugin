@@ -28,8 +28,9 @@ TAutoConsoleVariable<float> CVarThinOutlineSilhouetteThreshold(
 	TEXT("r.ThinOutline.Silhouette.Threshold"),
 	0.01f,
 	TEXT("Silhouette edge threshold. The edge measure is the distance of the neighbour's world position from the line through\n")
-	TEXT("the opposite neighbour's and the target pixel's, divided by the target pixel's linear depth. Values at or below the\n")
-	TEXT("threshold produce no silhouette, and count as one surface for creases and the history depth tests.\n")
+	TEXT("the opposite neighbour's and the target pixel's (see also r.ThinOutline.Silhouette.SymmetricMeasure), divided by the\n")
+	TEXT("target pixel's linear depth. Values at or below the threshold produce no silhouette, and count as one surface for\n")
+	TEXT("creases and the history depth tests.\n")
 	TEXT("A pixel with a silhouette is not a crease candidate.\n"),
 	ECVF_Default
 );
@@ -38,6 +39,16 @@ TAutoConsoleVariable<float> CVarThinOutlineSilhouetteScale(
 	TEXT("r.ThinOutline.Silhouette.Scale"),
 	50.0f,
 	TEXT("Silhouette strength = saturate((Measure - Threshold) * Scale).\n"),
+	ECVF_Default
+);
+
+TAutoConsoleVariable<int32> CVarThinOutlineSilhouetteSymmetricMeasure(
+	TEXT("r.ThinOutline.Silhouette.SymmetricMeasure"),
+	1,
+	TEXT("1 = the silhouette edge measure between a target pixel C and its neighbour N is the smaller of the distance of N\n")
+	TEXT("from the line through the opposite neighbour O and C, and the distance of C from the line through F (the pixel beyond\n")
+	TEXT("N) and N. The second term keeps junctions continuous where N's surface meets C's (a wall standing on a floor seen at\n")
+	TEXT("a grazing angle), so they stay creases. 0 = only the first term.\n"),
 	ECVF_Default
 );
 

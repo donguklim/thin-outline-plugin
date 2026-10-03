@@ -15,6 +15,7 @@ UThinOutlineSettings::UThinOutlineSettings(const FObjectInitializer& ObjectIniti
 	SilhouetteColor = FLinearColor::Black;
 	SilhouetteThreshold = 0.01f;
 	SilhouetteScale = 50.0f;
+	bSilhouetteSymmetricMeasure = true;
 	SilhouetteThickness = 1.0f;
 	SilhouetteHistoryViewAngle = 5.0f;
 	CreaseColor = FLinearColor::Black;

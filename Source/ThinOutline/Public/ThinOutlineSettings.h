@@ -47,6 +47,14 @@ public:
 	float SilhouetteScale;
 
 	/**
+	 * Also measure the edge from the neighbour's side: the smaller of the distance of the neighbour N from the line through the opposite
+	 * neighbour and the target pixel C, and the distance of C from the line through the pixel beyond N and N. Keeps junctions where N's
+	 * surface meets C's (a wall standing on a floor seen at a grazing angle) continuous, so they stay creases instead of silhouettes.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.SymmetricMeasure", DisplayName = "Symmetric Silhouette Measure"))
+	bool bSilhouetteSymmetricMeasure;
+
+	/**
 	 * Silhouette outline thickness in display pixels (pixels after the temporal upscaler), on the background side of the edge.
 	 * It does not reach further than about one rendering pixel beyond the edge.
 	 */
