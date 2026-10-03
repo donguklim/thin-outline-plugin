@@ -61,6 +61,7 @@ public:
 		SHADER_PARAMETER(float, HistoryDepthThreshold)
 		SHADER_PARAMETER(float, SilhouetteHistoryCosAngle)
 		SHADER_PARAMETER(uint32, bHistoryValid)
+		SHADER_PARAMETER(uint32, HistoryReprojectionMode)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)

@@ -3,8 +3,17 @@
 /*=============================================================================
 	ThinOutlineRecord.usf: updates the per-pixel edge records with this frame's jittered sample.
 
-	The previous frame's records are fetched at the reprojected pixel (nearest pixel) and moved into this pixel's
-	local coordinates, unless the history is rejected. Then this frame's edge checks add their samples.
+	The previous frame's records are fetched at the reprojected position and moved into this pixel's local coordinates,
+	unless the history is rejected. Then this frame's edge checks add their samples.
+
+	History reprojection (r.ThinOutline.Estimator.HistoryReprojection):
+	- Nearest: the history pixel nearest to the reprojected position. A record only moves by whole pixels while its edge
+	  moves by fractions, so under motion records slip past the edge (behind it when the fraction of the motion is below
+	  half a pixel, ahead of it above), leave the pixels that can sample the edge, and linger there while they decay.
+	- Bilinear: the four history pixels around the reprojected position, each moved into this pixel's coordinates and
+	  merged with bilinear weights (their sample counts scaled by the weights), so records follow the edge continuously.
+	- Range drop: a reprojected record whose edge has left the pixel's sampling range is dropped (see
+	  DropRecordOutsideSamplingRange).
 
 	Crease records belong to the pixel's own surface: they move with its velocity and are kept while their depth
 	matches the surface around the pixel.
@@ -49,6 +58,11 @@ float HistoryDepthThreshold;
 // Cosine of the largest angle the view direction of a silhouette may turn by in one frame.
 float SilhouetteHistoryCosAngle;
 uint bHistoryValid;
+// Bit 0: drop records outside the sampling range. Bit 1: bilinear history instead of the nearest history pixel.
+uint HistoryReprojectionMode;
+
+#define HISTORY_RANGE_DROP 1
+#define HISTORY_BILINEAR 2
 
 float2 ViewportPosToScreenPos(int2 ViewportPos)
 {
@@ -71,15 +85,71 @@ float3 GetPixelVelocity(int2 PixelPos, float DeviceZ)
 		: ComputeStaticVelocity(ViewportPosToScreenPos(PixelPos - int2(View.ViewRectMin.xy)), DeviceZ);
 }
 
-// The history pixel of a point at ScreenPos that moved by ScreenVelocity, and this pixel's center relative to the
-// center of the history pixel. Returns false when the point was outside the view.
-bool GetHistoryPixel(float2 ScreenPos, float2 ScreenVelocity, out int2 PrevPixel, out float2 Offset)
+// History pixels of a point at ScreenPos that moved by ScreenVelocity (see the top of the file), with their weights and
+// this pixel's center relative to each one's center. Taps outside the view get no weight.
+struct FThinOutlineHistoryTaps
+{
+	int2 Pixels[4];
+	float2 Offsets[4];
+	float Weights[4];
+};
+
+FThinOutlineHistoryTaps GetHistoryTaps(float2 ScreenPos, float2 ScreenVelocity)
 {
 	const float2 ViewSize = View.ViewSizeAndInvSize.xy;
 	const float2 PrevViewportPos = ((ScreenPos - ScreenVelocity) * float2(0.5, -0.5) + 0.5) * ViewSize;
-	PrevPixel = int2(floor(PrevViewportPos));
-	Offset = PrevViewportPos - (float2(PrevPixel) + 0.5);
-	return all(PrevPixel >= 0) && all(PrevPixel < int2(ViewSize));
+
+	FThinOutlineHistoryTaps Taps;
+	const bool bBilinear = (HistoryReprojectionMode & HISTORY_BILINEAR) != 0;
+	const float2 Corner = PrevViewportPos - 0.5;
+	const int2 BasePixel = bBilinear ? int2(floor(Corner)) : int2(floor(PrevViewportPos));
+	const float2 Fraction = Corner - float2(BasePixel);
+
+	UNROLL
+	for (uint Index = 0; Index < 4; ++Index)
+	{
+		const int2 Step = int2(Index & 1, Index >> 1);
+		Taps.Pixels[Index] = BasePixel + Step;
+		Taps.Offsets[Index] = PrevViewportPos - (float2(Taps.Pixels[Index]) + 0.5);
+
+		const float2 AxisWeights = lerp(1.0 - Fraction, Fraction, float2(Step));
+		Taps.Weights[Index] = bBilinear ? AxisWeights.x * AxisWeights.y : (Index == 0 ? 1.0 : 0.0);
+		if (any(Taps.Pixels[Index] < 0) || any(Taps.Pixels[Index] >= int2(ViewSize)))
+		{
+			Taps.Weights[Index] = 0.0;
+		}
+	}
+	return Taps;
+}
+
+// Merges one history record, moved into this pixel's coordinates, into the reprojected record with a weight: its
+// samples keep their relative weights, scaled by Weight.
+void AddHistoryRecord(inout FThinOutlineRecord Reprojected, FThinOutlineRecord Record, float2 Offset, float Weight)
+{
+	ShiftRecord(Record, Offset);
+	Record.SampleCount *= Weight;
+	Reprojected = MergeRecords(Reprojected, Record);
+}
+
+// A pixel samples an edge only while the edge lies in the pixel or in one of its two neighbours along the axis, so its
+// samples' u (trapezoid midlines 0.5 + E / 2 for an edge at u = E in (-1, 2)) lie in [0, 1.5]. A reprojected record whose
+// midline leaves that range over the pixel's whole span across the axis (v in [0, 1]) describes an edge the pixel can no
+// longer sample: dropped instead of lingering. The midline follows the record's own slope, since a slanted edge that
+// moves across the axis keeps its mean u while its samples leave the pixel.
+void DropRecordOutsideSamplingRange(inout FThinOutlineRecord Record)
+{
+	if ((HistoryReprojectionMode & HISTORY_RANGE_DROP) == 0 || Record.SampleCount <= 0.0)
+	{
+		return;
+	}
+
+	const float Slope = Record.Variance.y > THIN_OUTLINE_MIN_FIT_VARIANCE ? Record.Covariance / Record.Variance.y : 0.0;
+	const float MidlineAtV0 = Record.Mean.x - Slope * Record.Mean.y;
+	const float MidlineAtV1 = MidlineAtV0 + Slope;
+	if (max(MidlineAtV0, MidlineAtV1) < 0.0 || min(MidlineAtV0, MidlineAtV1) > 1.5)
+	{
+		Record = GetEmptyRecord();
+	}
 }
 
 // Fetches the previous frame's crease records of the surface under this pixel, moved into this pixel's local
@@ -97,16 +167,10 @@ bool ReprojectCreaseRecords(
 	VerticalRecord = GetEmptyRecord();
 
 	const float3 Velocity = GetPixelVelocity(PixelPos, Center.DeviceZ);
+	const FThinOutlineHistoryTaps Taps = GetHistoryTaps(ViewportPosToScreenPos(ViewportPos), Velocity.xy);
 
-	int2 PrevPixel;
-	float2 Offset;
-	if (!GetHistoryPixel(ViewportPosToScreenPos(ViewportPos), Velocity.xy, PrevPixel, Offset))
-	{
-		return false;
-	}
-
-	// The history pixel sampled the depth at its own jittered position, up to about a pixel away from this one. Accept
-	// it within the depth range of this pixel's surface neighbourhood, which also covers the bend across a crease.
+	// A history pixel sampled the depth at its own jittered position, about a pixel away from this one. Accept it
+	// within the depth range of this pixel's surface neighbourhood, which also covers the bend across a crease.
 	float MinDepth = Center.Depth;
 	float MaxDepth = Center.Depth;
 	UNROLL
@@ -125,19 +189,25 @@ bool ReprojectCreaseRecords(
 	const float DepthShift = PrevDepth - Center.Depth;
 	const float Tolerance = HistoryDepthThreshold * PrevDepth;
 
-	const float StoredDepth = HistoryDepth.Load(int3(PrevPixel, 0)).x;
-	const bool bDepthMatch = StoredDepth >= MinDepth + DepthShift - Tolerance && StoredDepth <= MaxDepth + DepthShift + Tolerance;
-	if (!bDepthMatch)
+	bool bAnyTap = false;
+	UNROLL
+	for (uint Index = 0; Index < 4; ++Index)
 	{
-		return false;
+		const int3 Texel = int3(Taps.Pixels[Index], 0);
+
+		BRANCH
+		if (Taps.Weights[Index] > 0.0)
+		{
+			const float StoredDepth = HistoryDepth.Load(Texel).x;
+			if (StoredDepth >= MinDepth + DepthShift - Tolerance && StoredDepth <= MaxDepth + DepthShift + Tolerance)
+			{
+				bAnyTap = true;
+				AddHistoryRecord(HorizontalRecord, UnpackRecord(HistoryCreaseHorizontalA.Load(Texel), HistoryCreaseHorizontalB.Load(Texel)), Taps.Offsets[Index].xy, Taps.Weights[Index]);
+				AddHistoryRecord(VerticalRecord, UnpackRecord(HistoryCreaseVerticalA.Load(Texel), HistoryCreaseVerticalB.Load(Texel)), Taps.Offsets[Index].yx, Taps.Weights[Index]);
+			}
+		}
 	}
-
-	HorizontalRecord = UnpackRecord(HistoryCreaseHorizontalA.Load(int3(PrevPixel, 0)), HistoryCreaseHorizontalB.Load(int3(PrevPixel, 0)));
-	VerticalRecord = UnpackRecord(HistoryCreaseVerticalA.Load(int3(PrevPixel, 0)), HistoryCreaseVerticalB.Load(int3(PrevPixel, 0)));
-
-	ShiftRecord(HorizontalRecord, Offset.xy);
-	ShiftRecord(VerticalRecord, Offset.yx);
-	return true;
+	return bAnyTap;
 }
 
 // The foreground a silhouette record next to this pixel belongs to: the nearest pixel within two pixels along the
@@ -227,9 +297,10 @@ bool ReprojectSilhouetteRecords(
 	const float3 Velocity = GetPixelVelocity(Foreground.PixelPos, Foreground.DeviceZ);
 	const float2 ScreenPos = ViewportPosToScreenPos(ViewportPos);
 
-	int2 PrevPixel;
-	float2 Offset;
-	if (!GetHistoryPixel(ScreenPos, Velocity.xy, PrevPixel, Offset))
+	// Translated world view directions. Directions do not depend on the frame's translation, so they can be compared.
+	const float3 ViewDirection = normalize(mul(float4(ScreenPos, 1.0, 0.0), View.ScreenToTranslatedWorld).xyz);
+	const float3 PrevViewDirection = normalize(mul(float4(ScreenPos - Velocity.xy, 1.0, 0.0), View.PrevScreenToTranslatedWorld).xyz);
+	if (dot(ViewDirection, PrevViewDirection) < SilhouetteHistoryCosAngle)
 	{
 		return false;
 	}
@@ -239,30 +310,33 @@ bool ReprojectSilhouetteRecords(
 	const float DepthShift = PrevDepth - Foreground.Depth;
 	const float Tolerance = HistoryDepthThreshold * PrevDepth;
 
-	const float StoredDepth = HistoryDepth.Load(int3(PrevPixel, 0)).y;
-	if (StoredDepth < Foreground.MinDepth + DepthShift - Tolerance || StoredDepth > Foreground.MaxDepth + DepthShift + Tolerance)
+	const FThinOutlineHistoryTaps Taps = GetHistoryTaps(ScreenPos, Velocity.xy);
+
+	bool bAnyTap = false;
+	UNROLL
+	for (uint Index = 0; Index < 4; ++Index)
 	{
-		return false;
+		const int3 Texel = int3(Taps.Pixels[Index], 0);
+
+		BRANCH
+		if (Taps.Weights[Index] > 0.0)
+		{
+			const float StoredDepth = HistoryDepth.Load(Texel).y;
+			if (StoredDepth >= Foreground.MinDepth + DepthShift - Tolerance && StoredDepth <= Foreground.MaxDepth + DepthShift + Tolerance)
+			{
+				bAnyTap = true;
+				FThinOutlineRecord TapHorizontal = UnpackRecord(HistorySilhouetteHorizontalA.Load(Texel), HistorySilhouetteHorizontalB.Load(Texel));
+				FThinOutlineRecord TapVertical = UnpackRecord(HistorySilhouetteVerticalA.Load(Texel), HistorySilhouetteVerticalB.Load(Texel));
+				const float2 KeptRatio = HistorySilhouetteKept.Load(Texel);
+				TapHorizontal.KeptRatio = KeptRatio.x;
+				TapVertical.KeptRatio = KeptRatio.y;
+
+				AddHistoryRecord(HorizontalRecord, TapHorizontal, Taps.Offsets[Index].xy, Taps.Weights[Index]);
+				AddHistoryRecord(VerticalRecord, TapVertical, Taps.Offsets[Index].yx, Taps.Weights[Index]);
+			}
+		}
 	}
-
-	// Translated world view directions. Directions do not depend on the frame's translation, so they can be compared.
-	const float3 ViewDirection = normalize(mul(float4(ScreenPos, 1.0, 0.0), View.ScreenToTranslatedWorld).xyz);
-	const float3 PrevViewDirection = normalize(mul(float4(ScreenPos - Velocity.xy, 1.0, 0.0), View.PrevScreenToTranslatedWorld).xyz);
-	if (dot(ViewDirection, PrevViewDirection) < SilhouetteHistoryCosAngle)
-	{
-		return false;
-	}
-
-	HorizontalRecord = UnpackRecord(HistorySilhouetteHorizontalA.Load(int3(PrevPixel, 0)), HistorySilhouetteHorizontalB.Load(int3(PrevPixel, 0)));
-	VerticalRecord = UnpackRecord(HistorySilhouetteVerticalA.Load(int3(PrevPixel, 0)), HistorySilhouetteVerticalB.Load(int3(PrevPixel, 0)));
-
-	const float2 KeptRatio = HistorySilhouetteKept.Load(int3(PrevPixel, 0));
-	HorizontalRecord.KeptRatio = KeptRatio.x;
-	VerticalRecord.KeptRatio = KeptRatio.y;
-
-	ShiftRecord(HorizontalRecord, Offset.xy);
-	ShiftRecord(VerticalRecord, Offset.yx);
-	return true;
+	return bAnyTap;
 }
 
 // Adds this frame's samples of the two checks of one axis. The first (left or top) check's samples are kept as they
@@ -318,6 +392,8 @@ void MainCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 		if (bHistoryValid != 0)
 		{
 			ReprojectCreaseRecords(ViewportPos, PixelPos, Center, Neighbours, FarNeighbours, CreaseHorizontal, CreaseVertical);
+			DropRecordOutsideSamplingRange(CreaseHorizontal);
+			DropRecordOutsideSamplingRange(CreaseVertical);
 		}
 
 		CreaseHorizontal.SampleCount *= SampleCountDecay;
@@ -339,6 +415,8 @@ void MainCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 	if (bHistoryValid != 0)
 	{
 		ReprojectSilhouetteRecords(ViewportPos, Foreground, SilhouetteHorizontal, SilhouetteVertical);
+		DropRecordOutsideSamplingRange(SilhouetteHorizontal);
+		DropRecordOutsideSamplingRange(SilhouetteVertical);
 	}
 
 	SilhouetteHorizontal.SampleCount *= SampleCountDecay;

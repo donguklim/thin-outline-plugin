@@ -27,6 +27,7 @@ struct FThinOutlineRenderSettings
 	float CoTriggerThreshold = 0.0f;
 	float SlopeStandardErrorThreshold = 0.0f;
 	float HistoryDepthThreshold = 0.0f;
+	int32 HistoryReprojection = 0;
 	int32 DebugView = 0;
 };
 
@@ -74,6 +75,7 @@ public:
 
 	//~ Begin ISceneViewExtension interface
 	virtual void BeginRenderViewFamily(FSceneViewFamily& InViewFamily) override;
+	virtual void SetupViewPoint(APlayerController* Player, FMinimalViewInfo& InViewInfo) override;
 	virtual void SubscribeToPostProcessingPass(
 		EPostProcessingPass Pass,
 		const FSceneView& InView,
@@ -97,6 +99,8 @@ private:
 
 	/** Updated from BeginRenderViewFamily through a render command, so it always matches the family being rendered. */
 	FThinOutlineRenderSettings RenderSettings_RenderThread;
+	/** Sideways camera offset accumulated by r.ThinOutline.Debug.CameraPan (game thread). */
+	float DebugCameraPanOffset = 0.0f;
 
 	/**
 	 * Keyed by FSceneViewStateInterface::GetViewKey(). Heap allocated, because the render graph writes extracted

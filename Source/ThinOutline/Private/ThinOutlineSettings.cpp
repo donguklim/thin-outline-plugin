@@ -27,4 +27,5 @@ UThinOutlineSettings::UThinOutlineSettings(const FObjectInitializer& ObjectIniti
 	CoTriggerThreshold = 0.05f;
 	SlopeStandardErrorThreshold = 0.05f;
 	HistoryDepthThreshold = 0.02f;
+	HistoryReprojection = 3;
 }

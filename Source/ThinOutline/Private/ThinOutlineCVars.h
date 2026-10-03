@@ -27,3 +27,7 @@ extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorDecay;
 extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorCoTriggerThreshold;
 extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorSlopeSEThreshold;
 extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorHistoryDepthThreshold;
+extern TAutoConsoleVariable<int32> CVarThinOutlineEstimatorHistoryReprojection;
+
+// Debugging
+extern TAutoConsoleVariable<float> CVarThinOutlineDebugCameraPan;

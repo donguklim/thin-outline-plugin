@@ -13,6 +13,7 @@
 #include "SceneViewState.h"
 #include "ScreenPass.h"
 #include "SystemTextures.h"
+#include "Camera/CameraTypes.h"
 
 DECLARE_GPU_STAT_NAMED(ThinOutline, TEXT("ThinOutline"));
 
@@ -47,6 +48,20 @@ FThinOutlineSceneViewExtension::FThinOutlineSceneViewExtension(const FAutoRegist
 {
 }
 
+void FThinOutlineSceneViewExtension::SetupViewPoint(APlayerController* Player, FMinimalViewInfo& InViewInfo)
+{
+	// Steady camera motion for offscreen tests, where nothing drives the camera.
+	const float Pan = CVarThinOutlineDebugCameraPan.GetValueOnGameThread();
+	if (Pan == 0.0f)
+	{
+		DebugCameraPanOffset = 0.0f;
+		return;
+	}
+
+	DebugCameraPanOffset += Pan;
+	InViewInfo.Location += InViewInfo.Rotation.RotateVector(FVector(0.0, DebugCameraPanOffset, 0.0));
+}
+
 bool FThinOutlineSceneViewExtension::IsActiveThisFrame_Internal(const FSceneViewExtensionContext& Context) const
 {
 	return CVarThinOutlineEnable.GetValueOnGameThread() > 0;
@@ -70,6 +85,7 @@ void FThinOutlineSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& InV
 	Settings.CoTriggerThreshold              = FMath::Max(0.0f, CVarThinOutlineEstimatorCoTriggerThreshold.GetValueOnGameThread());
 	Settings.SlopeStandardErrorThreshold     = FMath::Max(0.0f, CVarThinOutlineEstimatorSlopeSEThreshold.GetValueOnGameThread());
 	Settings.HistoryDepthThreshold           = FMath::Max(0.0f, CVarThinOutlineEstimatorHistoryDepthThreshold.GetValueOnGameThread());
+	Settings.HistoryReprojection             = FMath::Clamp(CVarThinOutlineEstimatorHistoryReprojection.GetValueOnGameThread(), 0, 3);
 	Settings.DebugView                       = CVarThinOutlineDebugView.GetValueOnGameThread();
 
 	ENQUEUE_RENDER_COMMAND(ThinOutlineUpdateSettings)(
@@ -222,6 +238,7 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->HistoryDepthThreshold        = Settings.HistoryDepthThreshold;
 		PassParameters->SilhouetteHistoryCosAngle    = FMath::Cos(FMath::DegreesToRadians(Settings.SilhouetteHistoryViewAngle));
 		PassParameters->bHistoryValid                = bHistoryValid ? 1 : 0;
+		PassParameters->HistoryReprojectionMode      = static_cast<uint32>(Settings.HistoryReprojection);
 
 		TShaderMapRef<FThinOutlineRecordCS> ComputeShader(GetGlobalShaderMap(View.GetFeatureLevel()));
 

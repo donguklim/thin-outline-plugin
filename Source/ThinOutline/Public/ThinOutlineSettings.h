@@ -119,4 +119,12 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Estimator", meta = (ConsoleVariable = "r.ThinOutline.Estimator.HistoryDepthThreshold", ClampMin = "0.0", UIMax = "0.2"))
 	float HistoryDepthThreshold;
+
+	/**
+	 * How the previous frame's edge records are fetched at the reprojected position. 0 = nearest history pixel (records slip past a
+	 * moving edge and linger); 1 = nearest, dropping records whose edge left the pixel's sampling range; 2 = bilinear (records follow
+	 * the edge continuously); 3 = bilinear with the range drop.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Estimator", meta = (ConsoleVariable = "r.ThinOutline.Estimator.HistoryReprojection", ClampMin = "0", ClampMax = "3"))
+	int32 HistoryReprojection;
 };

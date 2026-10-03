@@ -130,3 +130,24 @@ TAutoConsoleVariable<float> CVarThinOutlineEstimatorHistoryDepthThreshold(
 	TEXT("if its foreground depth is within this fraction of the current foreground depth.\n"),
 	ECVF_Default
 );
+
+TAutoConsoleVariable<int32> CVarThinOutlineEstimatorHistoryReprojection(
+	TEXT("r.ThinOutline.Estimator.HistoryReprojection"),
+	3,
+	TEXT("How the edge records of the previous frame are fetched at the reprojected position:\n")
+	TEXT("0 = nearest history pixel. A record moves by whole pixels while its edge moves by fractions, so under motion\n")
+	TEXT("    records slip past the edge and linger in pixels that can no longer sample it\n")
+	TEXT("1 = nearest, and records whose edge has left the pixel and its two neighbours along the axis are dropped\n")
+	TEXT("2 = bilinear: the four history pixels around the position, each moved into this pixel's coordinates, merged with\n")
+	TEXT("    bilinear weights, so records follow the edge continuously\n")
+	TEXT("3 = bilinear, and records outside the sampling range are dropped\n"),
+	ECVF_Default
+);
+
+TAutoConsoleVariable<float> CVarThinOutlineDebugCameraPan(
+	TEXT("r.ThinOutline.Debug.CameraPan"),
+	0.0f,
+	TEXT("Debugging: moves game cameras to the right by this many more cm every frame (0 = off), to test the outline under\n")
+	TEXT("steady camera motion where nothing drives the camera, e.g. offscreen captures.\n"),
+	ECVF_Cheat
+);
