@@ -84,8 +84,8 @@ TAutoConsoleVariable<int32> CVarThinOutlineSilhouetteHistorySurfaceTurn(
 	1,
 	TEXT("1 = the view angle of r.ThinOutline.Silhouette.HistoryViewAngle is measured relative to the surface inside the\n")
 	TEXT("contour, whose turn since the previous frame is tracked with the velocities of two of its pixels, so silhouettes of\n")
-	TEXT("objects turning in front of the camera are rejected too. 0 = the view direction's own turn only (cheaper: about\n")
-	TEXT("0.015 ms at 1280x720 on an RTX 5080, a separate shader permutation).\n"),
+	TEXT("objects turning in front of the camera are rejected too. 0 = the view direction's own turn only (a separate shader\n")
+	TEXT("permutation, about 0.001 ms cheaper at 1280x720 on an RTX 5080).\n"),
 	ECVF_Default
 );
 

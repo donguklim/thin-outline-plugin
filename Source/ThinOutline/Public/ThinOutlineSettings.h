@@ -72,7 +72,7 @@ public:
 	/**
 	 * Measure the history view angle relative to the surface inside the contour, whose turn since the previous frame is tracked with the
 	 * velocities of two of its pixels, so silhouettes of objects turning in front of the camera are rejected too. Off: the view direction's
-	 * own turn only, which is cheaper (about 0.015 ms at 1280x720 on an RTX 5080).
+	 * own turn only (a separate shader permutation, about 0.001 ms cheaper at 1280x720 on an RTX 5080).
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.HistorySurfaceTurn", DisplayName = "Silhouette History Follows Surface Turn"))
 	bool bSilhouetteHistorySurfaceTurn;

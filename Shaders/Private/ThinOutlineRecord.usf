@@ -358,8 +358,8 @@ bool HasViewTurnedOffContour(
 	const float3 RelativePrevViewDirection = TurnWithSurface(PrevViewDirection, PixelPos + Steps * InwardStep, InwardStep);
 	return HasViewLeftEdgePlane(Record, bVerticalAxis, Ray, RelativePrevViewDirection);
 #else
-	// r.ThinOutline.Silhouette.HistorySurfaceTurn 0: the view direction's own turn only. Any code here costs about 0.015 ms
-	// on the whole pass (it seems to push the pass over a register limit), hence a permutation.
+	// r.ThinOutline.Silhouette.HistorySurfaceTurn 0: the view direction's own turn only. (The surface turn used to cost
+	// 0.015 ms through register pressure, until MainCS fetched the silhouette history before the crease history.)
 	return HasViewLeftEdgePlane(Record, bVerticalAxis, Ray, PrevViewDirection);
 #endif
 }
@@ -556,17 +556,7 @@ void MainCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 
 	const FThinOutlineEdges Edges = DetectEdges(Center, Neighbours, FarNeighbours);
 
-	// Crease history. Sky has no surface to keep a crease record for.
-	FThinOutlineRecord CreaseHorizontal = GetEmptyRecord();
-	FThinOutlineRecord CreaseVertical = GetEmptyRecord();
-
-	if (!Center.bIsSky && bHistoryValid != 0)
-	{
-		ReprojectCreaseRecords(ViewportPos, PixelPos, Center, CreaseHorizontal, CreaseVertical);
-		DropRecordOutsideSamplingRange(CreaseHorizontal);
-		DropRecordOutsideSamplingRange(CreaseVertical);
-	}
-
+	// The silhouette history comes first: it holds the most values at once, and the crease records do not exist yet.
 	// Silhouette history, also on sky pixels, which are the background of a silhouette against the sky.
 	FThinOutlineRecord SilhouetteHorizontal = GetEmptyRecord();
 	FThinOutlineRecord SilhouetteVertical = GetEmptyRecord();
@@ -577,6 +567,17 @@ void MainCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 		ReprojectSilhouetteRecords(ViewportPos, Foreground, Center, Neighbours, FarNeighbours, SilhouetteHorizontal, SilhouetteVertical);
 		DropRecordOutsideSamplingRange(SilhouetteHorizontal);
 		DropRecordOutsideSamplingRange(SilhouetteVertical);
+	}
+
+	// Crease history. Sky has no surface to keep a crease record for.
+	FThinOutlineRecord CreaseHorizontal = GetEmptyRecord();
+	FThinOutlineRecord CreaseVertical = GetEmptyRecord();
+
+	if (!Center.bIsSky && bHistoryValid != 0)
+	{
+		ReprojectCreaseRecords(ViewportPos, PixelPos, Center, CreaseHorizontal, CreaseVertical);
+		DropRecordOutsideSamplingRange(CreaseHorizontal);
+		DropRecordOutsideSamplingRange(CreaseVertical);
 	}
 
 	CreaseHorizontal.SampleCount *= SampleCountDecay;

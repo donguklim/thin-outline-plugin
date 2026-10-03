@@ -119,8 +119,11 @@ FThinOutlineSample LoadDepthSample(int2 PixelPos)
 	Sample.DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(ClampedPos, 0)).r;
 	Sample.bIsSky = IsSkyDeviceZ(Sample.DeviceZ);
 	Sample.Depth = DeviceZToDepth(Sample.DeviceZ);
-	// The jittered SvPosition transform maps the pixel center back to the point the jittered projection sampled.
-	Sample.TranslatedWorldPosition = Sample.bIsSky ? float3(0, 0, 0) : SvPositionToTranslatedWorld(float4(float2(ClampedPos) + 0.5, Sample.DeviceZ, 1.0));
+	// The point the jittered projection sampled: the ray through the pixel's center, at the linear depth. (The engine's
+	// ScreenToTranslatedWorld reconstruction: a 4x3 transform without the division of SvPositionToTranslatedWorld, and the
+	// linear depth is needed anyway.)
+	const float2 ScreenPos = (float2(ClampedPos - int2(View.ViewRectMin.xy)) + 0.5) * View.ViewSizeAndInvSize.zw * float2(2.0, -2.0) + float2(-1.0, 1.0);
+	Sample.TranslatedWorldPosition = Sample.bIsSky ? float3(0, 0, 0) : mul(float4(ScreenPos * Sample.Depth, Sample.Depth, 1.0), View.ScreenToTranslatedWorld).xyz;
 	Sample.WorldNormal = float3(0, 0, 0);
 	Sample.bHasNormal = false;
 	return Sample;
@@ -250,10 +253,28 @@ FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neig
 	FThinOutlineEdges Edges;
 	Edges.MaxSilhouette = 0.0;
 
+	// The depth edge measure toward each neighbour, computed once: the silhouette check toward it, the crease check's
+	// same-surface test toward it, and the opposite direction's test of its opposite pixel all use the same one.
+	float DepthEdgeMeasures[4];
 	UNROLL
 	for (uint Index = 0; Index < 4; ++Index)
 	{
-		Edges.Silhouette[Index] = GetSilhouetteStrength(Center, Neighbours[Index], Neighbours[Index ^ 1], FarNeighbours[Index]);
+		DepthEdgeMeasures[Index] = GetDepthEdgeMeasure(Center, Neighbours[Index], Neighbours[Index ^ 1], FarNeighbours[Index]);
+	}
+
+	// As GetSilhouetteStrength.
+	UNROLL
+	for (uint Index = 0; Index < 4; ++Index)
+	{
+		const FThinOutlineSample Neighbour = Neighbours[Index];
+		if (Center.bIsSky)
+		{
+			Edges.Silhouette[Index] = Neighbour.bIsSky ? 0.0 : 1.0;
+		}
+		else
+		{
+			Edges.Silhouette[Index] = Center.Depth > Neighbour.Depth ? GetEdgeStrength(DepthEdgeMeasures[Index], SilhouetteThreshold, SilhouetteScale) : 0.0;
+		}
 		Edges.MaxSilhouette = max(Edges.MaxSilhouette, Edges.Silhouette[Index]);
 	}
 
@@ -269,12 +290,10 @@ FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neig
 		// Silhouettes take priority: a pixel with a silhouette is not a crease candidate.
 		// Creases only exist between pixels of a depth-continuous surface. This also keeps the foreground side
 		// of a silhouette (which has no silhouette strength itself) free of creases.
-		if (Edges.MaxSilhouette <= 0.0 && Center.bHasNormal && Neighbour.bHasNormal
-			&& GetDepthEdgeMeasure(Center, Neighbour, Opposite, FarNeighbours[Index]) <= SilhouetteThreshold)
+		if (Edges.MaxSilhouette <= 0.0 && Center.bHasNormal && Neighbour.bHasNormal && DepthEdgeMeasures[Index] <= SilhouetteThreshold)
 		{
 			// If the opposite pixel is not on the same surface, there is no normal rotation to extrapolate.
-			const bool bOppositeOnSurface = Opposite.bHasNormal
-				&& GetDepthEdgeMeasure(Center, Opposite, Neighbour, FarNeighbours[Index ^ 1]) <= SilhouetteThreshold;
+			const bool bOppositeOnSurface = Opposite.bHasNormal && DepthEdgeMeasures[Index ^ 1] <= SilhouetteThreshold;
 			const float3 OppositeNormal = bOppositeOnSurface ? Opposite.WorldNormal : Center.WorldNormal;
 
 			const float CreaseMeasure = GetCreaseEdgeMeasure(Center.WorldNormal, Neighbour.WorldNormal, OppositeNormal);
