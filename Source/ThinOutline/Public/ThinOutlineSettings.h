@@ -75,6 +75,15 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.HistoryDepthThreshold", ClampMin = "0.0", UIMax = "0.2"))
 	float SilhouetteHistoryDepthThreshold;
 
+	/**
+	 * A pixel keeps one edge record per axis, of either type. A crease sample takes over the axis's silhouette record only when that
+	 * record's decayed sample count is below this; otherwise the crease sample is ignored. This keeps the record of a silhouette's edge
+	 * pixel, whose sample alternates between the background and a foreground with creases. Below 1, so that a silhouette that just got
+	 * its first sample survives the next frame's crease sample. A silhouette sample always takes over a crease record.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.CreaseTakeoverSampleCount", ClampMin = "0.0", UIMax = "1.0"))
+	float SilhouetteCreaseTakeoverSampleCount;
+
 	/** Crease outline color. Written into pre-exposed HDR scene color, so it does not depend on exposure, but it is still tonemapped. */
 	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (HideAlphaChannel))
 	FLinearColor CreaseColor;

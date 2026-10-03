@@ -19,6 +19,7 @@ struct FThinOutlineRenderSettings
 	bool bSilhouetteSymmetricMeasure = true;
 	float SilhouetteThickness = 0.0f;
 	float SilhouetteHistoryViewAngle = 0.0f;
+	float SilhouetteCreaseTakeoverSampleCount = 0.0f;
 	float CreaseRidgeThreshold = 0.0f;
 	float CreaseValleyThreshold = 0.0f;
 	float CreaseScale = 0.0f;
@@ -32,20 +33,19 @@ struct FThinOutlineRenderSettings
 	int32 DebugView = 0;
 };
 
-/** Textures of the edge records (see ThinOutlineCommon.ush and ThinOutlineRecord.usf). */
+/**
+ * Textures of the edge records (see ThinOutlineCommon.ush and ThinOutlineRecord.usf): one record per inducer axis, either a
+ * crease or a silhouette record (the sign of its sample count).
+ */
 namespace EThinOutlineHistoryTexture
 {
 	enum Type : int32
 	{
-		CreaseHorizontalA,
-		CreaseHorizontalB,
-		CreaseVerticalA,
-		CreaseVerticalB,
-		SilhouetteHorizontalA,
-		SilhouetteHorizontalB,
-		SilhouetteVerticalA,
-		SilhouetteVerticalB,
-		/** Kept ratio of the horizontal and vertical silhouette records. */
+		HorizontalA,
+		HorizontalB,
+		VerticalA,
+		VerticalB,
+		/** Kept ratio of the horizontal and vertical records, used by silhouette records only. */
 		SilhouetteKept,
 		/** Linear depth of the pixel's surface and of its foreground when the records were written. */
 		Depth,

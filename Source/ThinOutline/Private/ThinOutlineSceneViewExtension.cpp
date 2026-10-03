@@ -30,14 +30,10 @@ namespace ThinOutline
 
 	static const FHistoryTextureInfo HistoryTextureInfos[EThinOutlineHistoryTexture::Num] =
 	{
-		{ PF_FloatRGBA, TEXT("ThinOutline.CreaseHorizontalA") },
-		{ PF_FloatRGBA, TEXT("ThinOutline.CreaseHorizontalB") },
-		{ PF_FloatRGBA, TEXT("ThinOutline.CreaseVerticalA") },
-		{ PF_FloatRGBA, TEXT("ThinOutline.CreaseVerticalB") },
-		{ PF_FloatRGBA, TEXT("ThinOutline.SilhouetteHorizontalA") },
-		{ PF_FloatRGBA, TEXT("ThinOutline.SilhouetteHorizontalB") },
-		{ PF_FloatRGBA, TEXT("ThinOutline.SilhouetteVerticalA") },
-		{ PF_FloatRGBA, TEXT("ThinOutline.SilhouetteVerticalB") },
+		{ PF_FloatRGBA, TEXT("ThinOutline.RecordHorizontalA") },
+		{ PF_FloatRGBA, TEXT("ThinOutline.RecordHorizontalB") },
+		{ PF_FloatRGBA, TEXT("ThinOutline.RecordVerticalA") },
+		{ PF_FloatRGBA, TEXT("ThinOutline.RecordVerticalB") },
 		{ PF_G16R16F, TEXT("ThinOutline.SilhouetteKept") },
 		{ PF_G32R32F, TEXT("ThinOutline.RecordDepth") },
 	};
@@ -70,24 +66,25 @@ bool FThinOutlineSceneViewExtension::IsActiveThisFrame_Internal(const FSceneView
 void FThinOutlineSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& InViewFamily)
 {
 	FThinOutlineRenderSettings Settings;
-	Settings.SilhouetteColor                 = GetDefault<UThinOutlineSettings>()->SilhouetteColor;
-	Settings.CreaseColor                     = GetDefault<UThinOutlineSettings>()->CreaseColor;
-	Settings.SilhouetteThreshold             = FMath::Max(0.0f, CVarThinOutlineSilhouetteThreshold.GetValueOnGameThread());
-	Settings.SilhouetteScale                 = FMath::Max(0.0f, CVarThinOutlineSilhouetteScale.GetValueOnGameThread());
-	Settings.bSilhouetteSymmetricMeasure     = CVarThinOutlineSilhouetteSymmetricMeasure.GetValueOnGameThread() != 0;
-	Settings.SilhouetteThickness             = FMath::Max(0.0f, CVarThinOutlineSilhouetteThickness.GetValueOnGameThread());
-	Settings.SilhouetteHistoryViewAngle      = FMath::Clamp(CVarThinOutlineSilhouetteHistoryViewAngle.GetValueOnGameThread(), 0.0f, 180.0f);
-	Settings.CreaseRidgeThreshold            = FMath::Max(0.0f, CVarThinOutlineCreaseRidgeThreshold.GetValueOnGameThread());
-	Settings.CreaseValleyThreshold           = FMath::Max(0.0f, CVarThinOutlineCreaseValleyThreshold.GetValueOnGameThread());
-	Settings.CreaseScale                     = FMath::Max(0.0f, CVarThinOutlineCreaseScale.GetValueOnGameThread());
-	Settings.CreaseThickness                 = FMath::Max(0.0f, CVarThinOutlineCreaseThickness.GetValueOnGameThread());
-	Settings.EstimatorDecay                  = FMath::Clamp(CVarThinOutlineEstimatorDecay.GetValueOnGameThread(), 0.001f, 1.0f);
-	Settings.CoTriggerThreshold              = FMath::Max(0.0f, CVarThinOutlineEstimatorCoTriggerThreshold.GetValueOnGameThread());
-	Settings.SlopeStandardErrorThreshold     = FMath::Max(0.0f, CVarThinOutlineEstimatorSlopeSEThreshold.GetValueOnGameThread());
-	Settings.CreaseHistoryDepthThreshold     = FMath::Max(0.0f, CVarThinOutlineCreaseHistoryDepthThreshold.GetValueOnGameThread());
-	Settings.SilhouetteHistoryDepthThreshold = FMath::Max(0.0f, CVarThinOutlineSilhouetteHistoryDepthThreshold.GetValueOnGameThread());
-	Settings.HistoryReprojection             = FMath::Clamp(CVarThinOutlineEstimatorHistoryReprojection.GetValueOnGameThread(), 0, 3);
-	Settings.DebugView                       = CVarThinOutlineDebugView.GetValueOnGameThread();
+	Settings.SilhouetteColor                     = GetDefault<UThinOutlineSettings>()->SilhouetteColor;
+	Settings.CreaseColor                         = GetDefault<UThinOutlineSettings>()->CreaseColor;
+	Settings.SilhouetteThreshold                 = FMath::Max(0.0f, CVarThinOutlineSilhouetteThreshold.GetValueOnGameThread());
+	Settings.SilhouetteScale                     = FMath::Max(0.0f, CVarThinOutlineSilhouetteScale.GetValueOnGameThread());
+	Settings.bSilhouetteSymmetricMeasure         = CVarThinOutlineSilhouetteSymmetricMeasure.GetValueOnGameThread() != 0;
+	Settings.SilhouetteThickness                 = FMath::Max(0.0f, CVarThinOutlineSilhouetteThickness.GetValueOnGameThread());
+	Settings.SilhouetteHistoryViewAngle          = FMath::Clamp(CVarThinOutlineSilhouetteHistoryViewAngle.GetValueOnGameThread(), 0.0f, 180.0f);
+	Settings.SilhouetteCreaseTakeoverSampleCount = FMath::Max(0.0f, CVarThinOutlineSilhouetteCreaseTakeoverSampleCount.GetValueOnGameThread());
+	Settings.CreaseRidgeThreshold                = FMath::Max(0.0f, CVarThinOutlineCreaseRidgeThreshold.GetValueOnGameThread());
+	Settings.CreaseValleyThreshold               = FMath::Max(0.0f, CVarThinOutlineCreaseValleyThreshold.GetValueOnGameThread());
+	Settings.CreaseScale                         = FMath::Max(0.0f, CVarThinOutlineCreaseScale.GetValueOnGameThread());
+	Settings.CreaseThickness                     = FMath::Max(0.0f, CVarThinOutlineCreaseThickness.GetValueOnGameThread());
+	Settings.EstimatorDecay                      = FMath::Clamp(CVarThinOutlineEstimatorDecay.GetValueOnGameThread(), 0.001f, 1.0f);
+	Settings.CoTriggerThreshold                  = FMath::Max(0.0f, CVarThinOutlineEstimatorCoTriggerThreshold.GetValueOnGameThread());
+	Settings.SlopeStandardErrorThreshold         = FMath::Max(0.0f, CVarThinOutlineEstimatorSlopeSEThreshold.GetValueOnGameThread());
+	Settings.CreaseHistoryDepthThreshold         = FMath::Max(0.0f, CVarThinOutlineCreaseHistoryDepthThreshold.GetValueOnGameThread());
+	Settings.SilhouetteHistoryDepthThreshold     = FMath::Max(0.0f, CVarThinOutlineSilhouetteHistoryDepthThreshold.GetValueOnGameThread());
+	Settings.HistoryReprojection                 = FMath::Clamp(CVarThinOutlineEstimatorHistoryReprojection.GetValueOnGameThread(), 0, 3);
+	Settings.DebugView                           = CVarThinOutlineDebugView.GetValueOnGameThread();
 
 	ENQUEUE_RENDER_COMMAND(ThinOutlineUpdateSettings)(
 		[WeakThis = AsWeak(), Settings](FRHICommandListImmediate& RHICmdList)
@@ -210,37 +207,30 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 
 	{
 		FThinOutlineRecordCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FThinOutlineRecordCS::FParameters>();
-		PassParameters->View                            = View.ViewUniformBuffer;
-		PassParameters->SceneTexturesStruct             = Inputs.SceneTextures.SceneTextures;
-		PassParameters->Substrate                       = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
-		PassParameters->EdgeCheck                       = EdgeCheck;
-		PassParameters->HistoryCreaseHorizontalA        = HistoryRecords[CreaseHorizontalA];
-		PassParameters->HistoryCreaseHorizontalB        = HistoryRecords[CreaseHorizontalB];
-		PassParameters->HistoryCreaseVerticalA          = HistoryRecords[CreaseVerticalA];
-		PassParameters->HistoryCreaseVerticalB          = HistoryRecords[CreaseVerticalB];
-		PassParameters->HistorySilhouetteHorizontalA    = HistoryRecords[SilhouetteHorizontalA];
-		PassParameters->HistorySilhouetteHorizontalB    = HistoryRecords[SilhouetteHorizontalB];
-		PassParameters->HistorySilhouetteVerticalA      = HistoryRecords[SilhouetteVerticalA];
-		PassParameters->HistorySilhouetteVerticalB      = HistoryRecords[SilhouetteVerticalB];
-		PassParameters->HistorySilhouetteKept           = HistoryRecords[SilhouetteKept];
-		PassParameters->HistoryDepth                    = HistoryRecords[Depth];
-		PassParameters->RWCreaseHorizontalA             = GraphBuilder.CreateUAV(Records[CreaseHorizontalA]);
-		PassParameters->RWCreaseHorizontalB             = GraphBuilder.CreateUAV(Records[CreaseHorizontalB]);
-		PassParameters->RWCreaseVerticalA               = GraphBuilder.CreateUAV(Records[CreaseVerticalA]);
-		PassParameters->RWCreaseVerticalB               = GraphBuilder.CreateUAV(Records[CreaseVerticalB]);
-		PassParameters->RWSilhouetteHorizontalA         = GraphBuilder.CreateUAV(Records[SilhouetteHorizontalA]);
-		PassParameters->RWSilhouetteHorizontalB         = GraphBuilder.CreateUAV(Records[SilhouetteHorizontalB]);
-		PassParameters->RWSilhouetteVerticalA           = GraphBuilder.CreateUAV(Records[SilhouetteVerticalA]);
-		PassParameters->RWSilhouetteVerticalB           = GraphBuilder.CreateUAV(Records[SilhouetteVerticalB]);
-		PassParameters->RWSilhouetteKept                = GraphBuilder.CreateUAV(Records[SilhouetteKept]);
-		PassParameters->RWDepth                         = GraphBuilder.CreateUAV(Records[Depth]);
-		PassParameters->SampleLocalPosition             = SampleLocalPosition;
-		PassParameters->SampleCountDecay                = 1.0f - Settings.EstimatorDecay;
-		PassParameters->CreaseHistoryDepthThreshold     = Settings.CreaseHistoryDepthThreshold;
-		PassParameters->SilhouetteHistoryDepthThreshold = Settings.SilhouetteHistoryDepthThreshold;
-		PassParameters->SilhouetteHistoryCosAngle       = FMath::Cos(FMath::DegreesToRadians(Settings.SilhouetteHistoryViewAngle));
-		PassParameters->bHistoryValid                   = bHistoryValid ? 1 : 0;
-		PassParameters->HistoryReprojectionMode         = static_cast<uint32>(Settings.HistoryReprojection);
+		PassParameters->View                                = View.ViewUniformBuffer;
+		PassParameters->SceneTexturesStruct                 = Inputs.SceneTextures.SceneTextures;
+		PassParameters->Substrate                           = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
+		PassParameters->EdgeCheck                           = EdgeCheck;
+		PassParameters->HistoryHorizontalA                  = HistoryRecords[HorizontalA];
+		PassParameters->HistoryHorizontalB                  = HistoryRecords[HorizontalB];
+		PassParameters->HistoryVerticalA                    = HistoryRecords[VerticalA];
+		PassParameters->HistoryVerticalB                    = HistoryRecords[VerticalB];
+		PassParameters->HistorySilhouetteKept               = HistoryRecords[SilhouetteKept];
+		PassParameters->HistoryDepth                        = HistoryRecords[Depth];
+		PassParameters->RWHorizontalA                       = GraphBuilder.CreateUAV(Records[HorizontalA]);
+		PassParameters->RWHorizontalB                       = GraphBuilder.CreateUAV(Records[HorizontalB]);
+		PassParameters->RWVerticalA                         = GraphBuilder.CreateUAV(Records[VerticalA]);
+		PassParameters->RWVerticalB                         = GraphBuilder.CreateUAV(Records[VerticalB]);
+		PassParameters->RWSilhouetteKept                    = GraphBuilder.CreateUAV(Records[SilhouetteKept]);
+		PassParameters->RWDepth                             = GraphBuilder.CreateUAV(Records[Depth]);
+		PassParameters->SampleLocalPosition                 = SampleLocalPosition;
+		PassParameters->SampleCountDecay                    = 1.0f - Settings.EstimatorDecay;
+		PassParameters->CreaseHistoryDepthThreshold         = Settings.CreaseHistoryDepthThreshold;
+		PassParameters->SilhouetteHistoryDepthThreshold     = Settings.SilhouetteHistoryDepthThreshold;
+		PassParameters->SilhouetteHistoryCosAngle           = FMath::Cos(FMath::DegreesToRadians(Settings.SilhouetteHistoryViewAngle));
+		PassParameters->SilhouetteCreaseTakeoverSampleCount = Settings.SilhouetteCreaseTakeoverSampleCount;
+		PassParameters->bHistoryValid                       = bHistoryValid ? 1 : 0;
+		PassParameters->HistoryReprojectionMode             = static_cast<uint32>(Settings.HistoryReprojection);
 
 		TShaderMapRef<FThinOutlineRecordCS> ComputeShader(GetGlobalShaderMap(View.GetFeatureLevel()));
 
@@ -297,14 +287,10 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->Input                       = GetScreenPassTextureViewportParameters(InputViewport);
 		PassParameters->Output                      = GetScreenPassTextureViewportParameters(OutputViewport);
 		PassParameters->InputSceneColorTexture      = SceneColor.Texture;
-		PassParameters->CreaseHorizontalA           = Records[CreaseHorizontalA];
-		PassParameters->CreaseHorizontalB           = Records[CreaseHorizontalB];
-		PassParameters->CreaseVerticalA             = Records[CreaseVerticalA];
-		PassParameters->CreaseVerticalB             = Records[CreaseVerticalB];
-		PassParameters->SilhouetteHorizontalA       = Records[SilhouetteHorizontalA];
-		PassParameters->SilhouetteHorizontalB       = Records[SilhouetteHorizontalB];
-		PassParameters->SilhouetteVerticalA         = Records[SilhouetteVerticalA];
-		PassParameters->SilhouetteVerticalB         = Records[SilhouetteVerticalB];
+		PassParameters->HorizontalA                 = Records[HorizontalA];
+		PassParameters->HorizontalB                 = Records[HorizontalB];
+		PassParameters->VerticalA                   = Records[VerticalA];
+		PassParameters->VerticalB                   = Records[VerticalB];
 		PassParameters->SilhouetteKept              = Records[SilhouetteKept];
 		PassParameters->RWForegroundDeviceZ         = GraphBuilder.CreateUAV(ForegroundDeviceZ);
 		PassParameters->RWForegroundVelocity        = GraphBuilder.CreateUAV(ForegroundVelocity);

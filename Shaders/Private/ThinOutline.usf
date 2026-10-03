@@ -3,8 +3,9 @@
 /*=============================================================================
 	ThinOutline.usf: draws the outline reconstructed from the edge records at rendering resolution.
 
-	Per edge type and axis, a pixel fits the pooled samples of its own record and its two neighbours' along the axis,
-	weighted by their sample counts. The neighbours' records are shifted into the pixel's coordinates by -0.5
+	Each axis of a pixel keeps one record, a crease or a silhouette record. Per axis, a pixel fits the pooled samples of
+	its own record and its two neighbours' along the axis, weighted by their sample counts, taking only the records of
+	the edge type it evaluates. The neighbours' records are shifted into the pixel's coordinates by -0.5
 	(left/top neighbour) and +0.5 (right/bottom neighbour). Around an edge all three describe the same line, so
 	neighbouring pixels pool nearly the same samples, and a pixel whose own history was just reset still gets its
 	neighbours' data. Records with a co-trigger ratio above the threshold mix in a second edge and are left out; a
@@ -14,7 +15,8 @@
 	with the clearly smaller slope standard error wins, otherwise the one with the smaller absolute slope.
 	A crease band is centered on the edge. A silhouette band lies on the background side of the edge only, so the
 	outline wraps around the foreground; the kept ratio of the records gives the side. A pixel without silhouette
-	samples of its own is foreground and draws no silhouette. Silhouette candidates take priority over creases.
+	samples of its own is foreground and draws no silhouette. Silhouette candidates take priority over creases. An axis
+	whose own record is a silhouette record draws no crease.
 
 	The outline alpha is the edge strength times the fraction of the display pixel (temporal upscaler output) under
 	this frame's sample, clipped to this rendering pixel, that the outline band covers.
@@ -32,14 +34,10 @@ SCREEN_PASS_TEXTURE_VIEWPORT(Output)
 
 Texture2D InputSceneColorTexture;
 
-Texture2D<float4> CreaseHorizontalA;
-Texture2D<float4> CreaseHorizontalB;
-Texture2D<float4> CreaseVerticalA;
-Texture2D<float4> CreaseVerticalB;
-Texture2D<float4> SilhouetteHorizontalA;
-Texture2D<float4> SilhouetteHorizontalB;
-Texture2D<float4> SilhouetteVerticalA;
-Texture2D<float4> SilhouetteVerticalB;
+Texture2D<float4> HorizontalA;
+Texture2D<float4> HorizontalB;
+Texture2D<float4> VerticalA;
+Texture2D<float4> VerticalB;
 Texture2D<float2> SilhouetteKept;
 
 // Device Z (0 where nothing is overwritten) and encoded velocity to give each pixel, indexed by viewport position.
@@ -66,42 +64,26 @@ uint DebugView;
 #define AXIS_HORIZONTAL 0
 #define AXIS_VERTICAL 1
 
-#define EDGE_CREASE 0
-#define EDGE_SILHOUETTE 1
-
-FThinOutlineRecord LoadRecord(uint EdgeType, uint Axis, int2 ViewportPos)
+// A pixel's record of one axis. Outside the view: empty.
+FThinOutlineRecord LoadRecord(uint Axis, int2 ViewportPos, out uint EdgeType)
 {
-	FThinOutlineRecord Record = GetEmptyRecord();
+	EdgeType = EDGE_CREASE;
 	if (any(ViewportPos < 0) || any(ViewportPos >= int2(View.ViewSizeAndInvSize.xy)))
 	{
-		return Record;
+		return GetEmptyRecord();
 	}
 
 	const int3 Texel = int3(ViewportPos, 0);
-	if (EdgeType == EDGE_CREASE)
+	FThinOutlineRecord Record;
+	if (Axis == AXIS_HORIZONTAL)
 	{
-		if (Axis == AXIS_HORIZONTAL)
-		{
-			Record = UnpackRecord(CreaseHorizontalA.Load(Texel), CreaseHorizontalB.Load(Texel));
-		}
-		else
-		{
-			Record = UnpackRecord(CreaseVerticalA.Load(Texel), CreaseVerticalB.Load(Texel));
-		}
+		Record = UnpackRecord(HorizontalA.Load(Texel), HorizontalB.Load(Texel), EdgeType);
+		Record.KeptRatio = SilhouetteKept.Load(Texel).x;
 	}
 	else
 	{
-		const float2 KeptRatio = SilhouetteKept.Load(Texel);
-		if (Axis == AXIS_HORIZONTAL)
-		{
-			Record = UnpackRecord(SilhouetteHorizontalA.Load(Texel), SilhouetteHorizontalB.Load(Texel));
-			Record.KeptRatio = KeptRatio.x;
-		}
-		else
-		{
-			Record = UnpackRecord(SilhouetteVerticalA.Load(Texel), SilhouetteVerticalB.Load(Texel));
-			Record.KeptRatio = KeptRatio.y;
-		}
+		Record = UnpackRecord(VerticalA.Load(Texel), VerticalB.Load(Texel), EdgeType);
+		Record.KeptRatio = SilhouetteKept.Load(Texel).y;
 	}
 	return Record;
 }
@@ -109,6 +91,37 @@ FThinOutlineRecord LoadRecord(uint EdgeType, uint Axis, int2 ViewportPos)
 int2 GetAxisStep(uint Axis)
 {
 	return Axis == AXIS_HORIZONTAL ? int2(1, 0) : int2(0, 1);
+}
+
+// The records of a pixel and of its two neighbours along an axis: left (top), own, right (bottom).
+struct FThinOutlineAxisRecords
+{
+	FThinOutlineRecord Records[3];
+	uint EdgeTypes[3];
+};
+
+FThinOutlineAxisRecords LoadAxisRecords(uint Axis, int2 ViewportPos)
+{
+	const int2 AxisStep = GetAxisStep(Axis);
+
+	FThinOutlineAxisRecords AxisRecords;
+	UNROLL
+	for (int Index = 0; Index < 3; ++Index)
+	{
+		AxisRecords.Records[Index] = LoadRecord(Axis, ViewportPos + (Index - 1) * AxisStep, AxisRecords.EdgeTypes[Index]);
+	}
+	return AxisRecords;
+}
+
+// The record at Index if it is of the given type, else an empty record.
+FThinOutlineRecord GetRecordOfType(FThinOutlineAxisRecords AxisRecords, int Index, uint EdgeType)
+{
+	FThinOutlineRecord Record = GetEmptyRecord();
+	if (AxisRecords.EdgeTypes[Index] == EdgeType)
+	{
+		Record = AxisRecords.Records[Index];
+	}
+	return Record;
 }
 
 // AlongOffset: this pixel's origin along the axis, in the record's coordinates.
@@ -121,14 +134,13 @@ void PoolRecord(inout FThinOutlineRecord Pooled, FThinOutlineRecord Record, floa
 	}
 }
 
-FThinOutlineRecord GetFitRecord(uint EdgeType, uint Axis, int2 ViewportPos, FThinOutlineRecord OwnRecord)
+// The own record and the neighbours' of the given type, pooled.
+FThinOutlineRecord GetFitRecord(uint EdgeType, FThinOutlineAxisRecords AxisRecords)
 {
-	const int2 AxisStep = GetAxisStep(Axis);
-
 	FThinOutlineRecord Pooled = GetEmptyRecord();
-	PoolRecord(Pooled, LoadRecord(EdgeType, Axis, ViewportPos - AxisStep), 1.0);
-	PoolRecord(Pooled, OwnRecord, 0.0);
-	PoolRecord(Pooled, LoadRecord(EdgeType, Axis, ViewportPos + AxisStep), -1.0);
+	PoolRecord(Pooled, GetRecordOfType(AxisRecords, 0, EdgeType), 1.0);
+	PoolRecord(Pooled, GetRecordOfType(AxisRecords, 1, EdgeType), 0.0);
+	PoolRecord(Pooled, GetRecordOfType(AxisRecords, 2, EdgeType), -1.0);
 	return Pooled;
 }
 
@@ -144,10 +156,11 @@ struct FThinOutlineCandidate
 	bool bBackgroundAlongU;
 };
 
-FThinOutlineCandidate GetCandidate(uint EdgeType, uint Axis, int2 ViewportPos)
+FThinOutlineCandidate GetCandidate(uint EdgeType, FThinOutlineAxisRecords AxisRecords)
 {
-	const FThinOutlineRecord OwnRecord = LoadRecord(EdgeType, Axis, ViewportPos);
-	const FThinOutlineRecord Record = GetFitRecord(EdgeType, Axis, ViewportPos, OwnRecord);
+	const FThinOutlineRecord OwnRecord = GetRecordOfType(AxisRecords, 1, EdgeType);
+	const bool bOwnRecordOfOtherType = AxisRecords.EdgeTypes[1] != EdgeType && AxisRecords.Records[1].SampleCount > 0.0;
+	const FThinOutlineRecord Record = GetFitRecord(EdgeType, AxisRecords);
 
 	FThinOutlineCandidate Candidate;
 	Candidate.Fit = FitEdge(Record, DistinctSampleScale);
@@ -169,11 +182,12 @@ FThinOutlineCandidate GetCandidate(uint EdgeType, uint Axis, int2 ViewportPos)
 
 	// A pixel whose own record mixes in a second edge has no edge on this axis: between two close edges, the pooled
 	// neighbours would put a line in the gap. A pixel that never sampled a silhouette itself is its foreground: its
-	// pooled neighbours describe the contour, but painting it would eat into the foreground's shape.
+	// pooled neighbours describe the contour, but painting it would eat into the foreground's shape. An axis whose own
+	// record is a silhouette record draws no crease.
 	// The pixel only draws the part of the outline band that crosses it.
 	Candidate.bValid = Candidate.Fit.bValid
 		&& OwnRecord.CoTriggerRatio <= CoTriggerThreshold
-		&& (EdgeType == EDGE_CREASE || OwnRecord.SampleCount > 0.0)
+		&& (EdgeType == EDGE_CREASE ? !bOwnRecordOfOtherType : OwnRecord.SampleCount > 0.0)
 		&& GetBandArea(Candidate.Fit.Intercept, Candidate.Fit.Slope, Candidate.BandMin, Candidate.BandMax, float2(0.0, 0.0), float2(1.0, 1.0)) > THIN_OUTLINE_MIN_BAND_AREA;
 	return Candidate;
 }
@@ -206,15 +220,18 @@ void MainPS(
 	const int2 ViewportPos = int2(OutputViewportPos);
 	const int2 PixelPos = int2(View.ViewRectMin.xy) + ViewportPos;
 
-	FThinOutlineCandidate Horizontal = GetCandidate(EDGE_SILHOUETTE, AXIS_HORIZONTAL, ViewportPos);
-	FThinOutlineCandidate Vertical = GetCandidate(EDGE_SILHOUETTE, AXIS_VERTICAL, ViewportPos);
+	const FThinOutlineAxisRecords HorizontalRecords = LoadAxisRecords(AXIS_HORIZONTAL, ViewportPos);
+	const FThinOutlineAxisRecords VerticalRecords = LoadAxisRecords(AXIS_VERTICAL, ViewportPos);
+
+	FThinOutlineCandidate Horizontal = GetCandidate(EDGE_SILHOUETTE, HorizontalRecords);
+	FThinOutlineCandidate Vertical = GetCandidate(EDGE_SILHOUETTE, VerticalRecords);
 	bool bSilhouette = true;
 
 	BRANCH
 	if (!Horizontal.bValid && !Vertical.bValid)
 	{
-		Horizontal = GetCandidate(EDGE_CREASE, AXIS_HORIZONTAL, ViewportPos);
-		Vertical = GetCandidate(EDGE_CREASE, AXIS_VERTICAL, ViewportPos);
+		Horizontal = GetCandidate(EDGE_CREASE, HorizontalRecords);
+		Vertical = GetCandidate(EDGE_CREASE, VerticalRecords);
 		bSilhouette = false;
 	}
 
@@ -304,8 +321,8 @@ void MainPS(
 	else if (DebugView == 2 || DebugView == 4)
 	{
 		const uint EdgeType = DebugView == 2 ? EDGE_CREASE : EDGE_SILHOUETTE;
-		const FThinOutlineRecord HorizontalRecord = LoadRecord(EdgeType, AXIS_HORIZONTAL, ViewportPos);
-		const FThinOutlineRecord VerticalRecord = LoadRecord(EdgeType, AXIS_VERTICAL, ViewportPos);
+		const FThinOutlineRecord HorizontalRecord = GetRecordOfType(HorizontalRecords, 1, EdgeType);
+		const FThinOutlineRecord VerticalRecord = GetRecordOfType(VerticalRecords, 1, EdgeType);
 
 		// Creases: co-trigger ratio. Silhouettes: kept ratio of the record with more samples.
 		const float Blue = EdgeType == EDGE_CREASE

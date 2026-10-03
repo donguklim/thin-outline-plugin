@@ -78,6 +78,17 @@ TAutoConsoleVariable<float> CVarThinOutlineSilhouetteHistoryViewAngle(
 	ECVF_Default
 );
 
+TAutoConsoleVariable<float> CVarThinOutlineSilhouetteCreaseTakeoverSampleCount(
+	TEXT("r.ThinOutline.Silhouette.CreaseTakeoverSampleCount"),
+	0.5f,
+	TEXT("A pixel keeps one edge record per axis, of either type. A crease sample takes over the axis's silhouette record\n")
+	TEXT("only when that record's decayed sample count is below this; otherwise the crease sample is ignored. This keeps the\n")
+	TEXT("record of a silhouette's edge pixel, whose sample alternates between the background and a foreground with creases.\n")
+	TEXT("Below 1, so that a silhouette that just got its first sample survives the next frame's crease sample.\n")
+	TEXT("A silhouette sample always takes over a crease record.\n"),
+	ECVF_Default
+);
+
 TAutoConsoleVariable<float> CVarThinOutlineCreaseRidgeThreshold(
 	TEXT("r.ThinOutline.Crease.RidgeThreshold"),
 	0.25f,

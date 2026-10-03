@@ -19,6 +19,7 @@ UThinOutlineSettings::UThinOutlineSettings(const FObjectInitializer& ObjectIniti
 	SilhouetteThickness = 1.0f;
 	SilhouetteHistoryViewAngle = 5.0f;
 	SilhouetteHistoryDepthThreshold = 0.02f;
+	SilhouetteCreaseTakeoverSampleCount = 0.5f;
 	CreaseColor = FLinearColor::Black;
 	CreaseRidgeThreshold = 0.25f;
 	CreaseValleyThreshold = 0.25f;

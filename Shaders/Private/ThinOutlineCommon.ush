@@ -27,7 +27,8 @@
 
 	Strength = Measure > Threshold ? saturate((Measure - Threshold) * Scale) : 0
 
-	Edge records, one per edge type and inducer axis (horizontal = left/right checks, vertical = top/bottom checks):
+	Edge records, one per inducer axis (horizontal = left/right checks, vertical = top/bottom checks), each either a
+	crease or a silhouette record (a pixel draws one or the other):
 	Every frame, a check that fires adds this frame's jittered sample position (u, v) to the record of its axis, in
 	pixel-local coordinates [0, 1]^2. u is the coordinate along the axis (x for horizontal), v the other one.
 	Samples of the left (top) check are added as they are, samples of the right (bottom) check are moved by +0.5
@@ -290,6 +291,10 @@ FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neig
 
 //------------------------------------------------------- EDGE RECORDS
 
+// Edge type of a record, stored in the sign of its sample count (negative for silhouettes). An empty record has no type.
+#define EDGE_CREASE 0
+#define EDGE_SILHOUETTE 1
+
 // Running statistics of the samples of one inducer axis, as (u, v) = (along the axis, across it).
 // Moments are central, so moving a record to other pixel-local coordinates only moves its mean.
 struct FThinOutlineRecord
@@ -313,23 +318,25 @@ FThinOutlineRecord GetEmptyRecord()
 	return (FThinOutlineRecord)0;
 }
 
-// Two RGBA16F textures per axis: A = (n, mean u, mean v, co-trigger ratio), B = (variance u, variance v, covariance, strength).
-// The kept ratio of silhouette records is stored separately.
-FThinOutlineRecord UnpackRecord(float4 A, float4 B)
+// Two RGBA16F textures per axis: A = (n, mean u, mean v, co-trigger ratio), B = (variance u, variance v, covariance,
+// strength), with -n for silhouette records. The kept ratio of silhouette records is stored separately.
+FThinOutlineRecord UnpackRecord(float4 A, float4 B, out uint EdgeType)
 {
 	FThinOutlineRecord Record;
-	Record.SampleCount = A.x;
+	Record.SampleCount = abs(A.x);
 	Record.Mean = A.yz;
 	Record.CoTriggerRatio = A.w;
 	Record.Variance = B.xy;
 	Record.Covariance = B.z;
 	Record.Strength = B.w;
+	Record.KeptRatio = 0.0;
+	EdgeType = A.x < 0.0 ? EDGE_SILHOUETTE : EDGE_CREASE;
 	return Record;
 }
 
-void PackRecord(FThinOutlineRecord Record, out float4 A, out float4 B)
+void PackRecord(FThinOutlineRecord Record, uint EdgeType, out float4 A, out float4 B)
 {
-	A = float4(Record.SampleCount, Record.Mean, Record.CoTriggerRatio);
+	A = float4(EdgeType == EDGE_SILHOUETTE ? -Record.SampleCount : Record.SampleCount, Record.Mean, Record.CoTriggerRatio);
 	B = float4(Record.Variance, Record.Covariance, Record.Strength);
 }
 
