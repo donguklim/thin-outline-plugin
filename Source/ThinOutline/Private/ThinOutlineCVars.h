@@ -17,6 +17,7 @@ extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteThickness;
 extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteHistoryViewAngle;
 extern TAutoConsoleVariable<int32> CVarThinOutlineSilhouetteHistorySurfaceTurn;
 extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteHistoryDepthThreshold;
+extern TAutoConsoleVariable<int32> CVarThinOutlineSilhouetteHistoryBackgroundTest;
 extern TAutoConsoleVariable<float> CVarThinOutlineSilhouetteCreaseTakeoverSampleCount;
 
 // Crease (normal discontinuity)

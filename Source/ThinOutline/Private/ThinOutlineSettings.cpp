@@ -17,7 +17,8 @@ UThinOutlineSettings::UThinOutlineSettings(const FObjectInitializer& ObjectIniti
 	SilhouetteScale = 50.0f;
 	bSilhouetteSymmetricMeasure = true;
 	SilhouetteThickness = 1.0f;
-	SilhouetteHistoryViewAngle = 1.0f;
+	SilhouetteHistoryBackgroundTest = 0;
+	SilhouetteHistoryViewAngle = 0.0f;
 	bSilhouetteHistorySurfaceTurn = true;
 	SilhouetteHistoryDepthThreshold = 0.05f;
 	SilhouetteCreaseTakeoverSampleCount = 0.5f;

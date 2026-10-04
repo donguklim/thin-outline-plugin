@@ -16,14 +16,17 @@
 		No measure (0) when O is sky (C is then the foreground of a silhouette toward O, which says nothing about N) or
 		when O is C itself (clamped at the view rect border). Without F (sky, or N itself at the border) only the first
 		term counts.
-		Only counted on the background pixel (C farther than N), so a check fires toward the foreground.
-		A sky pixel (no depth) is a full silhouette toward every non-sky axial neighbour.
+		The check that records samples is the foreground pixel's (C nearer than N): it fires toward the background. The
+		background pixel's check (C farther than N, firing toward the foreground) is evaluated too: it decides which
+		pixel's velocity moves the history, and finds the foreground of a painted silhouette.
+		A sky pixel (no depth) is a full silhouette background toward every non-sky axial neighbour, and a non-sky pixel a
+		full silhouette foreground toward a sky neighbour.
 		The same measure, with the silhouette threshold, decides everywhere else whether two pixels are on one surface.
 
 	Crease (world normals):
 		Measure = min(|cross(C, N) - cross(O, C)|, |cross(C, N)|)
 		Ridges (convex) and valleys (concave) use separate thresholds.
-		Only evaluated when the pixel has no silhouette.
+		Only evaluated when the pixel has no silhouette (on either side).
 
 	Strength = Measure > Threshold ? saturate((Measure - Threshold) * Scale) : 0
 
@@ -36,9 +39,11 @@
 	least squares u = a + b v of the record gives the edge E = 2a - 1 + 2b v.
 	The statistics are decayed running averages: every frame, the sample count n is multiplied by (1 - d), and a new
 	sample is averaged in with weight 1 / n, so samples are weighted by (1 - d)^age.
-	A silhouette is only sampled by its background pixels, through the check facing the foreground, so the fraction
-	of samples that came through the left (top) check says on which side the foreground is. Silhouette records also
-	keep the mean depth of the foreground neighbours of their samples, which their history depth test uses.
+	A silhouette is only sampled by its foreground pixels, through the check facing the background, so the fraction
+	of samples that came through the left (top) check says on which side the background is (the left or top when it
+	is at least 0.5). The records move with the foreground's velocity, like the surface they lie on. Silhouette
+	records also keep the mean depth of their own pixel when it sampled them, i.e. of the foreground, which their
+	history depth test uses.
 =============================================================================*/
 
 #pragma once
@@ -220,8 +225,8 @@ float GetEdgeStrength(float Measure, float Threshold, float Scale)
 	return Measure > Threshold ? saturate((Measure - Threshold) * Scale) : 0.0;
 }
 
-// Silhouette strength of the check of C toward N (O on the other side of C, F beyond N). Silhouettes belong to the
-// background side only: C must be farther than N. A sky pixel next to geometry is always a silhouette.
+// Silhouette strength of the background pixel's check of C toward N (O on the other side of C, F beyond N): C must be
+// farther than N. A sky pixel next to geometry is always a silhouette.
 float GetSilhouetteStrength(FThinOutlineSample C, FThinOutlineSample N, FThinOutlineSample O, FThinOutlineSample F)
 {
 	if (C.bIsSky)
@@ -237,9 +242,12 @@ float GetSilhouetteStrength(FThinOutlineSample C, FThinOutlineSample N, FThinOut
 
 struct FThinOutlineEdges
 {
-	// Silhouette strength of each axial direction (NeighbourOffsets order); the neighbour is the foreground.
+	// Silhouette strength of the foreground pixel's check toward each axial direction (NeighbourOffsets order): the
+	// neighbour is the background. These checks record samples.
 	float Silhouette[4];
-	// Largest of Silhouette[].
+	// Silhouette strength of the background pixel's check toward each axial direction: the neighbour is the foreground.
+	float BackgroundSilhouette[4];
+	// Largest of both.
 	float MaxSilhouette;
 	// Crease strength of each axial direction. All zero when the pixel has a silhouette.
 	float Crease[4];
@@ -262,20 +270,24 @@ FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neig
 		DepthEdgeMeasures[Index] = GetDepthEdgeMeasure(Center, Neighbours[Index], Neighbours[Index ^ 1], FarNeighbours[Index]);
 	}
 
-	// As GetSilhouetteStrength.
+	// The background side as GetSilhouetteStrength; the foreground side with the same measure, toward a farther
+	// neighbour (a sky neighbour's measure is huge).
 	UNROLL
 	for (uint Index = 0; Index < 4; ++Index)
 	{
 		const FThinOutlineSample Neighbour = Neighbours[Index];
 		if (Center.bIsSky)
 		{
-			Edges.Silhouette[Index] = Neighbour.bIsSky ? 0.0 : 1.0;
+			Edges.Silhouette[Index] = 0.0;
+			Edges.BackgroundSilhouette[Index] = Neighbour.bIsSky ? 0.0 : 1.0;
 		}
 		else
 		{
-			Edges.Silhouette[Index] = Center.Depth > Neighbour.Depth ? GetEdgeStrength(DepthEdgeMeasures[Index], SilhouetteThreshold, SilhouetteScale) : 0.0;
+			const float Strength = GetEdgeStrength(DepthEdgeMeasures[Index], SilhouetteThreshold, SilhouetteScale);
+			Edges.Silhouette[Index] = Center.Depth < Neighbour.Depth ? Strength : 0.0;
+			Edges.BackgroundSilhouette[Index] = Center.Depth > Neighbour.Depth ? Strength : 0.0;
 		}
-		Edges.MaxSilhouette = max(Edges.MaxSilhouette, Edges.Silhouette[Index]);
+		Edges.MaxSilhouette = max(Edges.MaxSilhouette, max(Edges.Silhouette[Index], Edges.BackgroundSilhouette[Index]));
 	}
 
 	UNROLL
@@ -287,9 +299,8 @@ FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neig
 		const FThinOutlineSample Neighbour = Neighbours[Index];
 		const FThinOutlineSample Opposite = Neighbours[Index ^ 1];
 
-		// Silhouettes take priority: a pixel with a silhouette is not a crease candidate.
-		// Creases only exist between pixels of a depth-continuous surface. This also keeps the foreground side
-		// of a silhouette (which has no silhouette strength itself) free of creases.
+		// Silhouettes take priority: a pixel with a silhouette on either side is not a crease candidate.
+		// Creases only exist between pixels of a depth-continuous surface.
 		if (Edges.MaxSilhouette <= 0.0 && Center.bHasNormal && Neighbour.bHasNormal && DepthEdgeMeasures[Index] <= SilhouetteThreshold)
 		{
 			// If the opposite pixel is not on the same surface, there is no normal rotation to extrapolate.
@@ -333,10 +344,9 @@ struct FThinOutlineRecord
 	// Mean edge strength of the samples.
 	float Strength;
 	// Fraction of the samples recorded through the left (top) check. Only stored for silhouettes, where it is close
-	// to 1 when the foreground is on the left (top) and close to 0 when it is on the right (bottom).
+	// to 1 when the background is on the left (top) and close to 0 when it is on the right (bottom).
 	float KeptRatio;
-	// Mean linear depth of the neighbour each sample's check compared with, i.e. of the foreground. Only stored for
-	// silhouettes.
+	// Mean linear depth of the pixel when it recorded its samples, i.e. of the foreground. Only stored for silhouettes.
 	float ForegroundDepth;
 };
 
@@ -371,7 +381,7 @@ void PackRecord(FThinOutlineRecord Record, uint EdgeType, out float4 A, out floa
 
 // Exponentially weighted update of the running mean and central moments with one new sample of weight 1.
 // Kept is 1 for a sample of the left (top) check, 0 for one of the right (bottom) check. ForegroundDepth is the linear
-// depth of the neighbour the check compared with (only used by silhouette records).
+// depth of the foreground (only used by silhouette records).
 void AddRecordSample(inout FThinOutlineRecord Record, float2 Sample, float Kept, float CoTrigger, float Strength, float ForegroundDepth)
 {
 	Record.SampleCount += 1.0;

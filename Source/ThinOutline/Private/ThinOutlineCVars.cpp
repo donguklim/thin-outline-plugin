@@ -18,8 +18,9 @@ TAutoConsoleVariable<int32> CVarThinOutlineDebugView(
 	TEXT("    that gets a sample every frame; B = co-trigger ratio)\n")
 	TEXT("3 = outline alpha of the reconstructed edge (R = horizontal-inducer edge, G = vertical-inducer edge,\n")
 	TEXT("    B = the edge is a silhouette)\n")
-	TEXT("4 = silhouette records (R, G = sample counts as in 2; B = fraction of the samples from the left (top) check of\n")
-	TEXT("    the axis with more samples: 1 = foreground on the left (top), 0 = on the right (bottom))\n")
+	TEXT("4 = silhouette records, kept by the foreground pixels (R, G = sample counts as in 2; B = fraction of the samples\n")
+	TEXT("    from the left (top) check of the axis with more samples: 1 = background on the left (top), 0 = on the right\n")
+	TEXT("    (bottom))\n")
 	TEXT("5 = R = depth and velocity overwritten with the foreground's, G = silhouette outline alpha\n"),
 	ECVF_Default
 );
@@ -56,8 +57,21 @@ TAutoConsoleVariable<float> CVarThinOutlineSilhouetteHistoryDepthThreshold(
 	TEXT("r.ThinOutline.Silhouette.HistoryDepthThreshold"),
 	0.05f,
 	TEXT("Relative depth tolerance for keeping a reprojected silhouette record: its foreground depth (the mean depth of the\n")
-	TEXT("foreground neighbours of its samples) must match the depth of the pixel itself, or of one of the two pixels toward\n")
-	TEXT("the record's foreground side, within this fraction of the depth.\n"),
+	TEXT("foreground pixel when it recorded its samples) must match the depth of the pixel itself, or of its neighbour toward\n")
+	TEXT("the record's foreground side, within this fraction of the depth. Also the relative depth step of\n")
+	TEXT("r.ThinOutline.Silhouette.HistoryBackgroundTest 1.\n"),
+	ECVF_Default
+);
+
+TAutoConsoleVariable<int32> CVarThinOutlineSilhouetteHistoryBackgroundTest(
+	TEXT("r.ThinOutline.Silhouette.HistoryBackgroundTest"),
+	0,
+	TEXT("Silhouette records are kept by the foreground pixels of the contour, and a reprojected record is rejected when no\n")
+	TEXT("background is found within two pixels toward its background side. How the pixel two steps away is tested (the\n")
+	TEXT("nearer ones use this frame's edge checks):\n")
+	TEXT("0 = the silhouette measure seen from the pixel between (without its symmetric term)\n")
+	TEXT("1 = a relative depth step of r.ThinOutline.Silhouette.HistoryDepthThreshold (cheaper)\n")
+	TEXT("Separate shader permutations.\n"),
 	ECVF_Default
 );
 
@@ -65,27 +79,28 @@ TAutoConsoleVariable<float> CVarThinOutlineSilhouetteThickness(
 	TEXT("r.ThinOutline.Silhouette.Thickness"),
 	1.0f,
 	TEXT("Silhouette outline thickness in display pixels (pixels after the temporal upscaler). The outline lies on the\n")
-	TEXT("background side of the silhouette only. It is reconstructed from the two pixels next to the edge, so it does not\n")
-	TEXT("reach further than about one rendering pixel beyond the edge.\n"),
+	TEXT("background side of the silhouette only. It is drawn by the two pixels next to the edge on that side, so it does\n")
+	TEXT("not reach further than about one rendering pixel beyond the edge.\n"),
 	ECVF_Default
 );
 
 TAutoConsoleVariable<float> CVarThinOutlineSilhouetteHistoryViewAngle(
 	TEXT("r.ThinOutline.Silhouette.HistoryViewAngle"),
-	1.0f,
-	TEXT("Silhouette records are rejected when the view direction turns out of the plane through the camera and the edge by\n")
-	TEXT("more than this many degrees in one frame. At a smooth contour that plane is the surface's tangent plane: turning\n")
-	TEXT("within it moves the contour along itself, turning out of it slides the contour over the surface.\n"),
+	0.0f,
+	TEXT("Testing: silhouette records are rejected when the view direction turns out of the plane through the camera and the\n")
+	TEXT("edge by more than this many degrees in one frame (0 = off, a separate shader permutation). At a smooth contour that\n")
+	TEXT("plane is the surface's tangent plane: turning within it moves the contour along itself, turning out of it slides the\n")
+	TEXT("contour over the surface. The background test (r.ThinOutline.Silhouette.HistoryBackgroundTest) replaces it.\n"),
 	ECVF_Default
 );
 
 TAutoConsoleVariable<int32> CVarThinOutlineSilhouetteHistorySurfaceTurn(
 	TEXT("r.ThinOutline.Silhouette.HistorySurfaceTurn"),
 	1,
-	TEXT("1 = the view angle of r.ThinOutline.Silhouette.HistoryViewAngle is measured relative to the surface inside the\n")
-	TEXT("contour, whose turn since the previous frame is tracked with the velocities of two of its pixels, so silhouettes of\n")
-	TEXT("objects turning in front of the camera are rejected too. 0 = the view direction's own turn only (a separate shader\n")
-	TEXT("permutation, about 0.001 ms cheaper at 1280x720 on an RTX 5080).\n"),
+	TEXT("Testing, with r.ThinOutline.Silhouette.HistoryViewAngle > 0: 1 = the view angle is measured relative to the surface\n")
+	TEXT("inside the contour, whose turn since the previous frame is tracked with the velocities of two of its pixels, so\n")
+	TEXT("silhouettes of objects turning in front of the camera are rejected too. 0 = the view direction's own turn only\n")
+	TEXT("(a separate shader permutation).\n"),
 	ECVF_Default
 );
 
@@ -94,7 +109,7 @@ TAutoConsoleVariable<float> CVarThinOutlineSilhouetteCreaseTakeoverSampleCount(
 	0.5f,
 	TEXT("A pixel keeps one edge record per axis, of either type. A crease sample takes over the axis's silhouette record\n")
 	TEXT("only when that record's decayed sample count is below this; otherwise the crease sample is ignored. This keeps the\n")
-	TEXT("record of a silhouette's edge pixel, whose sample alternates between the background and a foreground with creases.\n")
+	TEXT("record of a silhouette's edge pixel, whose sample alternates between a foreground with creases and the background.\n")
 	TEXT("Below 1, so that a silhouette that just got its first sample survives the next frame's crease sample.\n")
 	TEXT("A silhouette sample always takes over a crease record.\n"),
 	ECVF_Default
@@ -168,10 +183,11 @@ TAutoConsoleVariable<int32> CVarThinOutlineEstimatorHistoryReprojection(
 	TEXT("How the edge records of the previous frame are fetched at the reprojected position:\n")
 	TEXT("0 = nearest history pixel. A record moves by whole pixels while its edge moves by fractions, so under motion\n")
 	TEXT("    records slip past the edge and linger in pixels that can no longer sample it\n")
-	TEXT("1 = nearest, and records whose edge has left the pixel and its two neighbours along the axis are dropped\n")
+	TEXT("1 = nearest, and crease records whose edge has left the pixel and its two neighbours along the axis are dropped\n")
 	TEXT("2 = bilinear: the four history pixels around the position, each moved into this pixel's coordinates, merged with\n")
 	TEXT("    bilinear weights, so records follow the edge continuously\n")
-	TEXT("3 = bilinear, and records outside the sampling range are dropped\n"),
+	TEXT("3 = bilinear, and crease records outside the sampling range are dropped\n")
+	TEXT("Silhouette records are never range dropped: they are rejected when their background is out of reach.\n"),
 	ECVF_Default
 );
 

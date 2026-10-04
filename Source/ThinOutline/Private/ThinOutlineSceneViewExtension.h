@@ -18,6 +18,7 @@ struct FThinOutlineRenderSettings
 	float SilhouetteScale = 0.0f;
 	bool bSilhouetteSymmetricMeasure = true;
 	float SilhouetteThickness = 0.0f;
+	bool bSilhouetteHistoryBackgroundDepthStep = false;
 	float SilhouetteHistoryViewAngle = 0.0f;
 	bool bSilhouetteHistorySurfaceTurn = true;
 	float SilhouetteCreaseTakeoverSampleCount = 0.0f;

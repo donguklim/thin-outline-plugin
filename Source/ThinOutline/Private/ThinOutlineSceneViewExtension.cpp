@@ -89,6 +89,7 @@ void FThinOutlineSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& InV
 	Settings.SilhouetteScale                     = FMath::Max(0.0f, CVarThinOutlineSilhouetteScale.GetValueOnGameThread());
 	Settings.bSilhouetteSymmetricMeasure         = CVarThinOutlineSilhouetteSymmetricMeasure.GetValueOnGameThread() != 0;
 	Settings.SilhouetteThickness                 = FMath::Max(0.0f, CVarThinOutlineSilhouetteThickness.GetValueOnGameThread());
+	Settings.bSilhouetteHistoryBackgroundDepthStep = CVarThinOutlineSilhouetteHistoryBackgroundTest.GetValueOnGameThread() == 1;
 	Settings.SilhouetteHistoryViewAngle          = FMath::Clamp(CVarThinOutlineSilhouetteHistoryViewAngle.GetValueOnGameThread(), 0.0f, 90.0f);
 	Settings.SilhouetteCreaseTakeoverSampleCount = FMath::Max(0.0f, CVarThinOutlineSilhouetteCreaseTakeoverSampleCount.GetValueOnGameThread());
 	Settings.bSilhouetteHistorySurfaceTurn       = CVarThinOutlineSilhouetteHistorySurfaceTurn.GetValueOnGameThread() != 0;
@@ -251,7 +252,10 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->HistoryReprojectionMode             = static_cast<uint32>(Settings.HistoryReprojection);
 
 		FThinOutlineRecordCS::FPermutationDomain PermutationVector;
-		PermutationVector.Set<FThinOutlineRecordCS::FSurfaceTurnDim>(Settings.bSilhouetteHistorySurfaceTurn);
+		const bool bViewAngleTest = Settings.SilhouetteHistoryViewAngle > 0.0f;
+		PermutationVector.Set<FThinOutlineRecordCS::FBackgroundDepthStepDim>(Settings.bSilhouetteHistoryBackgroundDepthStep);
+		PermutationVector.Set<FThinOutlineRecordCS::FViewAngleTestDim>(bViewAngleTest);
+		PermutationVector.Set<FThinOutlineRecordCS::FSurfaceTurnDim>(bViewAngleTest && Settings.bSilhouetteHistorySurfaceTurn);
 		TShaderMapRef<FThinOutlineRecordCS> ComputeShader(GetGlobalShaderMap(View.GetFeatureLevel()), PermutationVector);
 
 		FComputeShaderUtils::AddPass(

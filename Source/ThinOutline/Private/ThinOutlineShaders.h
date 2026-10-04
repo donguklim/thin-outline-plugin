@@ -31,9 +31,13 @@ public:
 
 	static constexpr int32 ThreadGroupSize = 8;
 
-	// r.ThinOutline.Silhouette.HistorySurfaceTurn: the silhouette view-angle test relative to the surface's own turn.
+	// r.ThinOutline.Silhouette.HistoryBackgroundTest 1: the silhouette background test uses a depth step two pixels away.
+	class FBackgroundDepthStepDim : SHADER_PERMUTATION_BOOL("BACKGROUND_DEPTH_STEP");
+	// r.ThinOutline.Silhouette.HistoryViewAngle > 0: the silhouette view-angle test (testing).
+	class FViewAngleTestDim : SHADER_PERMUTATION_BOOL("VIEW_ANGLE_TEST");
+	// r.ThinOutline.Silhouette.HistorySurfaceTurn: the view-angle test relative to the surface's own turn.
 	class FSurfaceTurnDim : SHADER_PERMUTATION_BOOL("SURFACE_TURN");
-	using FPermutationDomain = TShaderPermutationDomain<FSurfaceTurnDim>;
+	using FPermutationDomain = TShaderPermutationDomain<FBackgroundDepthStepDim, FViewAngleTestDim, FSurfaceTurnDim>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
@@ -64,6 +68,12 @@ public:
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
+		// The surface turn is part of the view-angle test.
+		const FPermutationDomain PermutationVector(Parameters.PermutationId);
+		if (PermutationVector.Get<FSurfaceTurnDim>() && !PermutationVector.Get<FViewAngleTestDim>())
+		{
+			return false;
+		}
 		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
 	}
 

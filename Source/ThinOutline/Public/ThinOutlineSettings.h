@@ -56,30 +56,38 @@ public:
 
 	/**
 	 * Silhouette outline thickness in display pixels (pixels after the temporal upscaler), on the background side of the edge.
-	 * It does not reach further than about one rendering pixel beyond the edge.
+	 * It is drawn by the two pixels next to the edge on that side, so it does not reach further than about one rendering pixel beyond the edge.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.Thickness", ClampMin = "0.0", UIMax = "4.0"))
 	float SilhouetteThickness;
 
 	/**
-	 * Silhouette records are rejected when the view direction turns out of the plane through the camera and the edge by more than this many
-	 * degrees in one frame. At a smooth contour that plane is the surface's tangent plane: turning within it moves the contour along itself,
-	 * turning out of it slides the contour over the surface.
+	 * Silhouette records are kept by the foreground pixels of the contour, and a reprojected record is rejected when no background is found
+	 * within two pixels toward its background side. How the pixel two steps away is tested: 0 = the silhouette measure seen from the pixel
+	 * between; 1 = a relative depth step of the history depth threshold (cheaper). Separate shader permutations.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.HistoryBackgroundTest", ClampMin = "0", ClampMax = "1"))
+	int32 SilhouetteHistoryBackgroundTest;
+
+	/**
+	 * Testing: silhouette records are rejected when the view direction turns out of the plane through the camera and the edge by more than
+	 * this many degrees in one frame (0 = off, a separate shader permutation). At a smooth contour that plane is the surface's tangent plane:
+	 * turning within it moves the contour along itself, turning out of it slides the contour over the surface.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.HistoryViewAngle", ClampMin = "0.0", ClampMax = "90.0", UIMax = "10.0", Units = "Degrees"))
 	float SilhouetteHistoryViewAngle;
 
 	/**
-	 * Measure the history view angle relative to the surface inside the contour, whose turn since the previous frame is tracked with the
-	 * velocities of two of its pixels, so silhouettes of objects turning in front of the camera are rejected too. Off: the view direction's
-	 * own turn only (a separate shader permutation, about 0.001 ms cheaper at 1280x720 on an RTX 5080).
+	 * Testing, with a history view angle above 0: measure it relative to the surface inside the contour, whose turn since the previous frame
+	 * is tracked with the velocities of two of its pixels, so silhouettes of objects turning in front of the camera are rejected too. Off:
+	 * the view direction's own turn only (a separate shader permutation).
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.HistorySurfaceTurn", DisplayName = "Silhouette History Follows Surface Turn"))
 	bool bSilhouetteHistorySurfaceTurn;
 
 	/**
-	 * Relative depth tolerance for keeping a reprojected silhouette record: its foreground depth (the mean depth of the foreground neighbours
-	 * of its samples) must match the depth of the pixel itself, or of one of the two pixels toward the record's foreground side, within this
+	 * Relative depth tolerance for keeping a reprojected silhouette record: its foreground depth (the mean depth of the foreground pixel when it
+	 * recorded its samples) must match the depth of the pixel itself, or of its neighbour toward the record's foreground side, within this
 	 * fraction of the depth.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.HistoryDepthThreshold", ClampMin = "0.0", UIMax = "0.2"))
@@ -148,8 +156,8 @@ public:
 
 	/**
 	 * How the previous frame's edge records are fetched at the reprojected position. 0 = nearest history pixel (records slip past a
-	 * moving edge and linger); 1 = nearest, dropping records whose edge left the pixel's sampling range; 2 = bilinear (records follow
-	 * the edge continuously); 3 = bilinear with the range drop.
+	 * moving edge and linger); 1 = nearest, dropping crease records whose edge left the pixel's sampling range; 2 = bilinear (records
+	 * follow the edge continuously); 3 = bilinear with the range drop. Silhouette records are rejected by their background test instead.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Estimator", meta = (ConsoleVariable = "r.ThinOutline.Estimator.HistoryReprojection", ClampMin = "0", ClampMax = "3"))
 	int32 HistoryReprojection;
