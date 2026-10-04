@@ -169,6 +169,26 @@ TAutoConsoleVariable<float> CVarThinOutlineCreaseHistoryDepthThreshold(
 	ECVF_Default
 );
 
+TAutoConsoleVariable<int32> CVarThinOutlineCreaseHistoryCreaseTest(
+	TEXT("r.ThinOutline.Crease.HistoryCreaseTest"),
+	1,
+	TEXT("1 = a crease record is dropped when a whole jitter cycle (the temporal upscaler's jitter sequence length, in frames)\n")
+	TEXT("passes without a crease found at the pixel along its axis (the crease measure above the keep level of\n")
+	TEXT("r.ThinOutline.Crease.HistoryCreaseTestThreshold). The depth test alone keeps records that slid along one\n")
+	TEXT("depth-continuous surface (a foot's crease left on the floor it stood on, a junction's crease carried onto a curved\n")
+	TEXT("wall). A crease thinner than a pixel is only found on some frames of a cycle, hence a whole cycle.\n")
+	TEXT("0 = depth test only. Separate shader permutations.\n"),
+	ECVF_Default
+);
+
+TAutoConsoleVariable<float> CVarThinOutlineCreaseHistoryCreaseTestThreshold(
+	TEXT("r.ThinOutline.Crease.HistoryCreaseTestThreshold"),
+	0.5f,
+	TEXT("Keep level of r.ThinOutline.Crease.HistoryCreaseTest, as a fraction of r.ThinOutline.Crease.RidgeThreshold and\n")
+	TEXT("ValleyThreshold. Below 1, so that a crease that fires only on some frames (near the threshold) keeps its record.\n"),
+	ECVF_Default
+);
+
 TAutoConsoleVariable<float> CVarThinOutlineEstimatorDecay(
 	TEXT("r.ThinOutline.Estimator.Decay"),
 	0.04f,

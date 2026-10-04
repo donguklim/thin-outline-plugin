@@ -26,7 +26,8 @@
 	Crease (world normals):
 		Measure = min(|cross(C, N) - cross(O, C)|, |cross(C, N)|)
 		Ridges (convex) and valleys (concave) use separate thresholds.
-		Only evaluated when the pixel has no silhouette (on either side).
+		A strength only when the pixel has no silhouette (on either side); the measure itself is also kept for the crease
+		history test of ThinOutlineRecord.usf.
 
 	Strength = Measure > Threshold ? saturate((Measure - Threshold) * Scale) : 0
 
@@ -251,9 +252,22 @@ struct FThinOutlineEdges
 	float MaxSilhouette;
 	// Crease strength of each axial direction. All zero when the pixel has a silhouette.
 	float Crease[4];
+	// Crease measure of each axial direction, also when the pixel has a silhouette; 0 across a depth discontinuity or
+	// without normals. The crease history test compares it with its own, lower thresholds.
+	float CreaseMeasure[4];
 	// Whether the crease of each direction is a ridge (convex) rather than a valley.
 	bool bRidge[4];
 };
+
+// Crease measure of the check of C toward N, O being the pixel on the other side of C (its normal only counts when it is
+// on C's surface: otherwise there is no normal rotation to extrapolate), and whether the crease is a ridge (convex: the
+// normals diverge along the direction from C to N).
+float GetCreaseCheckMeasure(FThinOutlineSample C, FThinOutlineSample N, FThinOutlineSample O, bool bOppositeOnSurface, out bool bRidge)
+{
+	const float3 OppositeNormal = bOppositeOnSurface ? O.WorldNormal : C.WorldNormal;
+	bRidge = dot(N.WorldNormal - C.WorldNormal, N.TranslatedWorldPosition - C.TranslatedWorldPosition) > 0.0;
+	return GetCreaseEdgeMeasure(C.WorldNormal, N.WorldNormal, OppositeNormal);
+}
 
 // See LoadOutlineNeighbourhood for the arguments.
 FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neighbours[4], FThinOutlineSample FarNeighbours[4])
@@ -294,26 +308,25 @@ FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neig
 	for (uint Index = 0; Index < 4; ++Index)
 	{
 		Edges.Crease[Index] = 0.0;
+		Edges.CreaseMeasure[Index] = 0.0;
 		Edges.bRidge[Index] = false;
 
 		const FThinOutlineSample Neighbour = Neighbours[Index];
 		const FThinOutlineSample Opposite = Neighbours[Index ^ 1];
 
-		// Silhouettes take priority: a pixel with a silhouette on either side is not a crease candidate.
 		// Creases only exist between pixels of a depth-continuous surface.
-		if (Edges.MaxSilhouette <= 0.0 && Center.bHasNormal && Neighbour.bHasNormal && DepthEdgeMeasures[Index] <= SilhouetteThreshold)
+		if (Center.bHasNormal && Neighbour.bHasNormal && DepthEdgeMeasures[Index] <= SilhouetteThreshold)
 		{
-			// If the opposite pixel is not on the same surface, there is no normal rotation to extrapolate.
 			const bool bOppositeOnSurface = Opposite.bHasNormal && DepthEdgeMeasures[Index ^ 1] <= SilhouetteThreshold;
-			const float3 OppositeNormal = bOppositeOnSurface ? Opposite.WorldNormal : Center.WorldNormal;
+			bool bRidge;
+			Edges.CreaseMeasure[Index] = GetCreaseCheckMeasure(Center, Neighbour, Opposite, bOppositeOnSurface, bRidge);
+			Edges.bRidge[Index] = bRidge;
 
-			const float CreaseMeasure = GetCreaseEdgeMeasure(Center.WorldNormal, Neighbour.WorldNormal, OppositeNormal);
-
-			// Convex when the normals diverge along the direction from the target to the neighbour.
-			const float3 NormalChange = Neighbour.WorldNormal - Center.WorldNormal;
-			const float3 PositionChange = Neighbour.TranslatedWorldPosition - Center.TranslatedWorldPosition;
-			Edges.bRidge[Index] = dot(NormalChange, PositionChange) > 0.0;
-			Edges.Crease[Index] = GetEdgeStrength(CreaseMeasure, Edges.bRidge[Index] ? CreaseRidgeThreshold : CreaseValleyThreshold, CreaseScale);
+			// Silhouettes take priority: a pixel with a silhouette on either side is not a crease candidate.
+			if (Edges.MaxSilhouette <= 0.0)
+			{
+				Edges.Crease[Index] = GetEdgeStrength(Edges.CreaseMeasure[Index], bRidge ? CreaseRidgeThreshold : CreaseValleyThreshold, CreaseScale);
+			}
 		}
 	}
 
@@ -346,7 +359,8 @@ struct FThinOutlineRecord
 	// Fraction of the samples recorded through the left (top) check. Only stored for silhouettes, where it is close
 	// to 1 when the background is on the left (top) and close to 0 when it is on the right (bottom).
 	float KeptRatio;
-	// Mean linear depth of the pixel when it recorded its samples, i.e. of the foreground. Only stored for silhouettes.
+	// Silhouettes: mean linear depth of the pixel when it recorded its samples, i.e. of the foreground. Creases (with the
+	// crease history test of ThinOutlineRecord.usf): frames since a crease was last found at the pixel along the axis.
 	float ForegroundDepth;
 };
 

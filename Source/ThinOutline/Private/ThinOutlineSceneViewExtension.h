@@ -32,6 +32,8 @@ struct FThinOutlineRenderSettings
 	float CoTriggerThreshold = 0.0f;
 	float SlopeStandardErrorThreshold = 0.0f;
 	float CreaseHistoryDepthThreshold = 0.0f;
+	bool bCreaseHistoryCreaseTest = true;
+	float CreaseHistoryCreaseTestThreshold = 0.0f;
 	float SilhouetteHistoryDepthThreshold = 0.0f;
 	int32 HistoryReprojection = 0;
 	int32 DebugView = 0;

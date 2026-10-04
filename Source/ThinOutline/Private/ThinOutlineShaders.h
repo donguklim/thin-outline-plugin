@@ -37,7 +37,9 @@ public:
 	class FViewAngleTestDim : SHADER_PERMUTATION_BOOL("VIEW_ANGLE_TEST");
 	// r.ThinOutline.Silhouette.HistorySurfaceTurn: the view-angle test relative to the surface's own turn.
 	class FSurfaceTurnDim : SHADER_PERMUTATION_BOOL("SURFACE_TURN");
-	using FPermutationDomain = TShaderPermutationDomain<FBackgroundDepthStepDim, FViewAngleTestDim, FSurfaceTurnDim>;
+	// r.ThinOutline.Crease.HistoryCreaseTest: crease records are dropped after a jitter cycle without a crease found.
+	class FCreaseHistoryTestDim : SHADER_PERMUTATION_BOOL("CREASE_HISTORY_TEST");
+	using FPermutationDomain = TShaderPermutationDomain<FBackgroundDepthStepDim, FViewAngleTestDim, FSurfaceTurnDim, FCreaseHistoryTestDim>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
@@ -62,6 +64,9 @@ public:
 		SHADER_PARAMETER(float, SilhouetteHistoryDepthThreshold)
 		SHADER_PARAMETER(float, SilhouetteHistorySinAngle)
 		SHADER_PARAMETER(float, SilhouetteCreaseTakeoverSampleCount)
+		SHADER_PARAMETER(float, CreaseHistoryKeepRidgeThreshold)
+		SHADER_PARAMETER(float, CreaseHistoryKeepValleyThreshold)
+		SHADER_PARAMETER(float, CreaseHistoryMissLimit)
 		SHADER_PARAMETER(uint32, bHistoryValid)
 		SHADER_PARAMETER(uint32, HistoryReprojectionMode)
 	END_SHADER_PARAMETER_STRUCT()
