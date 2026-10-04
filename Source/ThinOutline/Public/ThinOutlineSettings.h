@@ -142,9 +142,9 @@ public:
 	float CreaseHistoryDepthThreshold;
 
 	/**
-	 * Drop a crease record when a whole jitter cycle passes without a crease found at the pixel along its axis. The depth test alone keeps
-	 * records that slid along one depth-continuous surface (a foot's crease left on the floor it stood on, a junction's crease carried onto
-	 * a curved wall). A crease thinner than a pixel is only found on some frames of a cycle, hence a whole cycle. Separate shader permutations.
+	 * Drop a crease record after a number of frames without a crease found at the pixel along its axis. The depth test alone keeps records
+	 * that slid along one depth-continuous surface (a foot's crease left on the floor it stood on, a junction's crease carried onto a curved
+	 * wall, copies spread over a face widening on screen). Separate shader permutations.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.HistoryCreaseTest", DisplayName = "Crease History Crease Test"))
 	bool bCreaseHistoryCreaseTest;
@@ -155,6 +155,14 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.HistoryCreaseTestThreshold", ClampMin = "0.0", ClampMax = "1.0"))
 	float CreaseHistoryCreaseTestThreshold;
+
+	/**
+	 * Frames without a crease found after which the crease history test drops a record; 0 = a whole jitter cycle. Short, because a face that
+	 * widens on screen receives copies of the crease records next to it, which are drawn until dropped. A crease thinner than a pixel that is
+	 * found on fewer than about half the frames loses its records more often with a short limit.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.HistoryCreaseTestFrames", ClampMin = "0", UIMax = "32"))
+	int32 CreaseHistoryCreaseTestFrames;
 
 	/**
 	 * Decay rate d of the edge records' running statistics. Samples are weighted by (1 - d)^age in frames, so a record that gets

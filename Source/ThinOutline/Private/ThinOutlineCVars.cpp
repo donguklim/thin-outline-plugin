@@ -172,12 +172,22 @@ TAutoConsoleVariable<float> CVarThinOutlineCreaseHistoryDepthThreshold(
 TAutoConsoleVariable<int32> CVarThinOutlineCreaseHistoryCreaseTest(
 	TEXT("r.ThinOutline.Crease.HistoryCreaseTest"),
 	1,
-	TEXT("1 = a crease record is dropped when a whole jitter cycle (the temporal upscaler's jitter sequence length, in frames)\n")
-	TEXT("passes without a crease found at the pixel along its axis (the crease measure above the keep level of\n")
-	TEXT("r.ThinOutline.Crease.HistoryCreaseTestThreshold). The depth test alone keeps records that slid along one\n")
-	TEXT("depth-continuous surface (a foot's crease left on the floor it stood on, a junction's crease carried onto a curved\n")
-	TEXT("wall). A crease thinner than a pixel is only found on some frames of a cycle, hence a whole cycle.\n")
+	TEXT("1 = a crease record is dropped after r.ThinOutline.Crease.HistoryCreaseTestFrames frames without a crease found at the\n")
+	TEXT("pixel along its axis (the crease measure above the keep level of r.ThinOutline.Crease.HistoryCreaseTestThreshold).\n")
+	TEXT("The depth test alone keeps records that slid along one depth-continuous surface (a foot's crease left on the floor\n")
+	TEXT("it stood on, a junction's crease carried onto a curved wall, copies spread over a face widening on screen).\n")
 	TEXT("0 = depth test only. Separate shader permutations.\n"),
+	ECVF_Default
+);
+
+TAutoConsoleVariable<int32> CVarThinOutlineCreaseHistoryCreaseTestFrames(
+	TEXT("r.ThinOutline.Crease.HistoryCreaseTestFrames"),
+	3,
+	TEXT("Frames without a crease found at a crease record's pixel after which r.ThinOutline.Crease.HistoryCreaseTest drops the\n")
+	TEXT("record; 0 = a whole jitter cycle (the temporal upscaler's jitter sequence length). Short, because a face that widens\n")
+	TEXT("on screen (turning toward the camera) receives copies of the crease records next to it, each claiming the crease\n")
+	TEXT("runs through its own pixel, and they are drawn until dropped. A crease thinner than a pixel is only found on some\n")
+	TEXT("frames: one found on fewer than about half of them loses its records more often with a short limit.\n"),
 	ECVF_Default
 );
 

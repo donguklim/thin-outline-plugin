@@ -32,6 +32,7 @@ extern TAutoConsoleVariable<float> CVarThinOutlineCreaseThickness;
 extern TAutoConsoleVariable<float> CVarThinOutlineCreaseHistoryDepthThreshold;
 extern TAutoConsoleVariable<int32> CVarThinOutlineCreaseHistoryCreaseTest;
 extern TAutoConsoleVariable<float> CVarThinOutlineCreaseHistoryCreaseTestThreshold;
+extern TAutoConsoleVariable<int32> CVarThinOutlineCreaseHistoryCreaseTestFrames;
 
 // Temporal edge estimator (per-pixel OLS edge records)
 extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorDecay;

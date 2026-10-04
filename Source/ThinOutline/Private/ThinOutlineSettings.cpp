@@ -32,6 +32,7 @@ UThinOutlineSettings::UThinOutlineSettings(const FObjectInitializer& ObjectIniti
 	CreaseHistoryDepthThreshold = 0.05f;
 	bCreaseHistoryCreaseTest = true;
 	CreaseHistoryCreaseTestThreshold = 0.5f;
+	CreaseHistoryCreaseTestFrames = 3;
 	EstimatorDecay = 0.04f;
 	CoTriggerThreshold = 0.05f;
 	SlopeStandardErrorThreshold = 0.05f;

@@ -20,7 +20,7 @@
 	velocity, except on the frames when the pixel samples the background next to the contour: it then takes the velocity
 	of the foreground neighbour (see FindHistoryForeground), since the records it holds from the other frames belong to
 	the foreground. Each history tap's record feeds the reprojected record of its own type.
-	Crease records are kept while their depth matches the pixel's, and (CREASE_HISTORY_TEST) until a jitter cycle passes
+	Crease records are kept while their depth matches the pixel's, and (CREASE_HISTORY_TEST) until a few frames pass
 	without a crease found at the pixel along their axis (see UpdateCreaseMissCount).
 	Silhouette records are kept while their foreground depth matches the pixel's or its foreground neighbour's, and while
 	the background of the contour is still within two pixels toward the record's background side (see
@@ -65,7 +65,7 @@ float SilhouetteHistorySinAngle;
 float SilhouetteCreaseTakeoverSampleCount;
 // Keep level of the crease history test (CREASE_HISTORY_TEST): the crease thresholds scaled by
 // r.ThinOutline.Crease.HistoryCreaseTestThreshold; and the frames without a crease after which a crease record is
-// dropped (the jitter sequence length).
+// dropped (r.ThinOutline.Crease.HistoryCreaseTestFrames, or the jitter sequence length).
 float CreaseHistoryKeepRidgeThreshold;
 float CreaseHistoryKeepValleyThreshold;
 float CreaseHistoryMissLimit;
@@ -277,11 +277,14 @@ uint GetNearCreaseMask(FThinOutlineEdges Edges)
 
 // The crease history test of one axis's reprojected crease record (CREASE_HISTORY_TEST): its count of frames since a
 // crease was last found at the pixel along the axis restarts when one is found this frame, and the record is dropped
-// when the count reaches a jitter cycle. The depth test cannot see a record that slid along one depth-continuous surface
-// (a foot's crease left on the floor it stood on, a junction's crease carried onto the curved wall next to it), since a
-// crease joins two such surfaces by definition. A whole cycle, because a crease thinner than a pixel (a ledge seen
-// edge-on) is only found on the frames when a sample lands on it, and the pixel on either side of a crease only on the
-// frames when its own pair of pixels straddles it: both are found at least once per cycle while they stay in place.
+// when the count reaches CreaseHistoryMissLimit (r.ThinOutline.Crease.HistoryCreaseTestFrames, 3; 0 = a jitter cycle).
+// The depth test cannot see a record that slid along one depth-continuous surface (a foot's crease left on the floor it
+// stood on, a junction's crease carried onto the curved wall next to it), since a crease joins two such surfaces by
+// definition. Nor copies: the history only shifts records, so on a face that widens on screen (turning toward the
+// camera) the pixels that came from within a pixel of a crease each get a record claiming it runs through their own
+// pixel, and those near it draw. Not every frame, because a crease thinner than a pixel (a ledge seen edge-on) is only
+// found on the frames when a sample lands on it, and the pixel on either side of a crease only on the frames when its
+// own pair of pixels straddles it.
 void UpdateCreaseMissCount(inout FThinOutlineRecord Record, bool bCreaseFound)
 {
 	if (Record.SampleCount <= 0.0)
