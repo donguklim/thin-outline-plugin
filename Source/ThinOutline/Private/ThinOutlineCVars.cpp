@@ -25,6 +25,18 @@ TAutoConsoleVariable<int32> CVarThinOutlineCrease(
 	ECVF_Default
 );
 
+TAutoConsoleVariable<int32> CVarThinOutlineDrawAfterUpscaler(
+	TEXT("r.ThinOutline.DrawAfterUpscaler"),
+	0,
+	TEXT("Where the outline is drawn (the edge records are kept at rendering resolution before the upscaler either way):\n")
+	TEXT("0 = into scene color at rendering resolution, before the temporal upscaler (TSR, TAA, third party). Pixels painted with\n")
+	TEXT("    a silhouette get the foreground's depth and velocity, so the upscaler moves the outline with the foreground.\n")
+	TEXT("1 = into scene color at display resolution, after the temporal upscaler, depth of field, motion blur and translucency,\n")
+	TEXT("    before bloom and tonemapping. Each display pixel gets the exact coverage of the outline band, so the outline does\n")
+	TEXT("    not go through the upscaler's history. Depth and velocity are left untouched. Debug views are drawn there too.\n"),
+	ECVF_Default
+);
+
 TAutoConsoleVariable<int32> CVarThinOutlineDebugView(
 	TEXT("r.ThinOutline.DebugView"),
 	0,
@@ -37,7 +49,9 @@ TAutoConsoleVariable<int32> CVarThinOutlineDebugView(
 	TEXT("4 = silhouette records, kept by the foreground pixels (R, G = sample counts as in 2; B = fraction of the samples\n")
 	TEXT("    from the left (top) check of the axis with more samples: 1 = background on the left (top), 0 = on the right\n")
 	TEXT("    (bottom))\n")
-	TEXT("5 = R = depth and velocity overwritten with the foreground's, G = silhouette outline alpha\n"),
+	TEXT("5 = R = depth and velocity overwritten with the foreground's, G = silhouette outline alpha\n")
+	TEXT("With r.ThinOutline.DrawAfterUpscaler 1 they are drawn at display resolution: 1, 2 and 4 show the rendering pixel under\n")
+	TEXT("each display pixel (not blurred by the upscaler), 3 and 5 the display pixel's alpha, and 5's R stays 0.\n"),
 	ECVF_Default
 );
 

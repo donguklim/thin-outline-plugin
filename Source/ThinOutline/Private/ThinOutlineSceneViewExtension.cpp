@@ -7,6 +7,7 @@
 
 #include "PixelShaderUtils.h"
 #include "PostProcess/PostProcessMaterialInputs.h"
+#include "RenderGraphBlackboard.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphUtils.h"
 #include "SceneRendering.h"
@@ -37,7 +38,68 @@ namespace ThinOutline
 		{ PF_FloatRGBA, TEXT("ThinOutline.SilhouetteForeground") },
 		{ PF_R32_FLOAT, TEXT("ThinOutline.RecordDepth") },
 	};
+
+	/** This frame's edge records of a view, for the composite after the temporal upscaler. */
+	struct FViewRecords
+	{
+		const FSceneView* View = nullptr;
+		FRDGTextureRef Textures[EThinOutlineHistoryTexture::Num] = {};
+	};
+
+	/** Render graph blackboard entry: the records the BeforeDOF pass leaves for the MotionBlur after-pass of the same graph. */
+	struct FFrameRecords
+	{
+		TArray<FViewRecords, TInlineAllocator<2>> Views;
+	};
+
+	FThinOutlineEdgeCheckParameters GetEdgeCheckParameters(const FThinOutlineRenderSettings& Settings)
+	{
+		FThinOutlineEdgeCheckParameters EdgeCheck;
+		EdgeCheck.SilhouetteThreshold    = Settings.SilhouetteThreshold;
+		EdgeCheck.SilhouetteScale        = Settings.SilhouetteScale;
+		EdgeCheck.bSymmetricDepthMeasure = Settings.bSilhouetteSymmetricMeasure ? 1 : 0;
+		EdgeCheck.CreaseRidgeThreshold   = Settings.CreaseRidgeThreshold;
+		EdgeCheck.CreaseValleyThreshold  = Settings.CreaseValleyThreshold;
+		EdgeCheck.CreaseScale            = Settings.CreaseScale;
+		return EdgeCheck;
+	}
+
+	/** DisplaySize: size of the temporal upscaler's output, whose pixels the outline thicknesses are given in. */
+	FThinOutlineCompositeParameters GetCompositeParameters(
+		const FThinOutlineRenderSettings& Settings,
+		const FViewInfo& ViewInfo,
+		const FRDGTextureRef (&Records)[EThinOutlineHistoryTexture::Num],
+		FIntPoint DisplaySize)
+	{
+		const FIntPoint ViewSize = ViewInfo.ViewRect.Size();
+		const FVector2f RenderPixelsPerDisplayPixel(
+			float(ViewSize.X) / float(FMath::Max(DisplaySize.X, 1)),
+			float(ViewSize.Y) / float(FMath::Max(DisplaySize.Y, 1)));
+		const float MeanRenderPixelsPerDisplayPixel = 0.5f * (RenderPixelsPerDisplayPixel.X + RenderPixelsPerDisplayPixel.Y);
+
+		FThinOutlineCompositeParameters Parameters;
+		Parameters.HorizontalA                 = Records[EThinOutlineHistoryTexture::HorizontalA];
+		Parameters.HorizontalB                 = Records[EThinOutlineHistoryTexture::HorizontalB];
+		Parameters.VerticalA                   = Records[EThinOutlineHistoryTexture::VerticalA];
+		Parameters.VerticalB                   = Records[EThinOutlineHistoryTexture::VerticalB];
+		Parameters.SilhouetteForeground        = Records[EThinOutlineHistoryTexture::SilhouetteForeground];
+		Parameters.bDrawSilhouettes            = Settings.bDrawSilhouettes ? 1 : 0;
+		Parameters.bDrawCreases                = Settings.bDrawCreases ? 1 : 0;
+		Parameters.CreaseColor                 = FVector3f(Settings.CreaseColor.R, Settings.CreaseColor.G, Settings.CreaseColor.B);
+		Parameters.SilhouetteColor             = FVector3f(Settings.SilhouetteColor.R, Settings.SilhouetteColor.G, Settings.SilhouetteColor.B);
+		Parameters.RenderPixelsPerDisplayPixel = RenderPixelsPerDisplayPixel;
+		Parameters.CreaseThickness             = Settings.CreaseThickness * MeanRenderPixelsPerDisplayPixel;
+		Parameters.SilhouetteThickness         = Settings.SilhouetteThickness * MeanRenderPixelsPerDisplayPixel;
+		Parameters.CoTriggerThreshold          = Settings.CoTriggerThreshold;
+		Parameters.SlopeStandardErrorThreshold = Settings.SlopeStandardErrorThreshold;
+		Parameters.DistinctSampleScale         = FMath::Min(1.0f, Settings.EstimatorDecay * float(FMath::Max(ViewInfo.TemporalJitterSequenceLength, 1)));
+		Parameters.SaturatedSampleCount        = 1.0f / Settings.EstimatorDecay;
+		Parameters.DebugView                   = static_cast<uint32>(FMath::Max(Settings.DebugView, 0));
+		return Parameters;
+	}
 }
+
+RDG_REGISTER_BLACKBOARD_STRUCT(ThinOutline::FFrameRecords);
 
 FThinOutlineSceneViewExtension::FThinOutlineSceneViewExtension(const FAutoRegister& AutoRegister)
 	: FSceneViewExtensionBase(AutoRegister)
@@ -83,6 +145,7 @@ bool FThinOutlineSceneViewExtension::IsActiveThisFrame_Internal(const FSceneView
 void FThinOutlineSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& InViewFamily)
 {
 	FThinOutlineRenderSettings Settings;
+	Settings.bDrawAfterUpscaler                  = CVarThinOutlineDrawAfterUpscaler.GetValueOnGameThread() != 0;
 	Settings.bDrawSilhouettes                    = CVarThinOutlineSilhouette.GetValueOnGameThread() != 0;
 	Settings.bDrawCreases                        = CVarThinOutlineCrease.GetValueOnGameThread() != 0;
 	Settings.SilhouetteColor                     = GetDefault<UThinOutlineSettings>()->SilhouetteColor;
@@ -127,8 +190,10 @@ void FThinOutlineSceneViewExtension::SubscribeToPostProcessingPass(
 	FPostProcessingPassDelegateArray& InOutPassCallbacks,
 	bool bIsPassEnabled)
 {
-	// BeforeDOF runs at rendering resolution, before the temporal upscaler.
-	if (Pass != EPostProcessingPass::BeforeDOF)
+	// BeforeDOF runs at rendering resolution, before the temporal upscaler. The MotionBlur after-pass runs after it, at
+	// display resolution, also when motion blur itself is off. (Called on the render thread, with this family's settings.)
+	const bool bAfterUpscalerPass = Pass == EPostProcessingPass::MotionBlur && RenderSettings_RenderThread.bDrawAfterUpscaler;
+	if (Pass != EPostProcessingPass::BeforeDOF && !bAfterUpscalerPass)
 	{
 		return;
 	}
@@ -145,7 +210,9 @@ void FThinOutlineSceneViewExtension::SubscribeToPostProcessingPass(
 		return;
 	}
 
-	InOutPassCallbacks.Add(FPostProcessingPassDelegate::CreateRaw(this, &FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread));
+	InOutPassCallbacks.Add(bAfterUpscalerPass
+		? FPostProcessingPassDelegate::CreateRaw(this, &FThinOutlineSceneViewExtension::AddAfterUpscalerPass_RenderThread)
+		: FPostProcessingPassDelegate::CreateRaw(this, &FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread));
 }
 
 void FThinOutlineSceneViewExtension::ReleaseHistories_RenderThread()
@@ -196,13 +263,7 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 
 	RDG_EVENT_SCOPE_STAT(GraphBuilder, ThinOutline, "ThinOutline %dx%d", ViewSize.X, ViewSize.Y);
 
-	FThinOutlineEdgeCheckParameters EdgeCheck;
-	EdgeCheck.SilhouetteThreshold    = Settings.SilhouetteThreshold;
-	EdgeCheck.SilhouetteScale        = Settings.SilhouetteScale;
-	EdgeCheck.bSymmetricDepthMeasure = Settings.bSilhouetteSymmetricMeasure ? 1 : 0;
-	EdgeCheck.CreaseRidgeThreshold   = Settings.CreaseRidgeThreshold;
-	EdgeCheck.CreaseValleyThreshold  = Settings.CreaseValleyThreshold;
-	EdgeCheck.CreaseScale            = Settings.CreaseScale;
+	const FThinOutlineEdgeCheckParameters EdgeCheck = ThinOutline::GetEdgeCheckParameters(Settings);
 
 	// The projection jitter moves the scene by TemporalJitterPixels, so every pixel samples the G-buffer at its
 	// center minus the jitter.
@@ -289,6 +350,17 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		History->ViewStateFrameIndex = ViewStateFrameIndex;
 	}
 
+	if (Settings.bDrawAfterUpscaler)
+	{
+		ThinOutline::FViewRecords& ViewRecords = GraphBuilder.Blackboard.GetOrCreate<ThinOutline::FFrameRecords>().Views.AddDefaulted_GetRef();
+		ViewRecords.View = &View;
+		for (int32 Index = 0; Index < Num; ++Index)
+		{
+			ViewRecords.Textures[Index] = Records[Index];
+		}
+		return Inputs.ReturnUntouchedSceneColorForPostProcessing(GraphBuilder);
+	}
+
 	// Edge reconstruction and composite.
 	FScreenPassRenderTarget Output = Inputs.OverrideOutput;
 	if (!Output.IsValid())
@@ -303,10 +375,6 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 	const FIntPoint DisplaySize = View.PrimaryScreenPercentageMethod == EPrimaryScreenPercentageMethod::TemporalUpscale
 		? ViewInfo.GetSecondaryViewRectSize()
 		: ViewSize;
-	const FVector2f RenderPixelsPerDisplayPixel(
-		float(ViewSize.X) / float(FMath::Max(DisplaySize.X, 1)),
-		float(ViewSize.Y) / float(FMath::Max(DisplaySize.Y, 1)));
-	const float MeanRenderPixelsPerDisplayPixel = 0.5f * (RenderPixelsPerDisplayPixel.X + RenderPixelsPerDisplayPixel.Y);
 
 	// Depth and encoded velocity of the foreground of the pixels painted with a silhouette.
 	const FRDGTextureDesc ForegroundDeviceZDesc = FRDGTextureDesc::Create2D(ViewSize, PF_R32_FLOAT, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_UAV);
@@ -320,29 +388,13 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->SceneTexturesStruct         = Inputs.SceneTextures.SceneTextures;
 		PassParameters->Substrate                   = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
 		PassParameters->EdgeCheck                   = EdgeCheck;
+		PassParameters->Composite                   = ThinOutline::GetCompositeParameters(Settings, ViewInfo, Records, DisplaySize);
 		PassParameters->Input                       = GetScreenPassTextureViewportParameters(InputViewport);
 		PassParameters->Output                      = GetScreenPassTextureViewportParameters(OutputViewport);
 		PassParameters->InputSceneColorTexture      = SceneColor.Texture;
-		PassParameters->HorizontalA                 = Records[HorizontalA];
-		PassParameters->HorizontalB                 = Records[HorizontalB];
-		PassParameters->VerticalA                   = Records[VerticalA];
-		PassParameters->VerticalB                   = Records[VerticalB];
-		PassParameters->SilhouetteForeground        = Records[SilhouetteForeground];
 		PassParameters->RWForegroundDeviceZ         = GraphBuilder.CreateUAV(ForegroundDeviceZ);
 		PassParameters->RWForegroundVelocity        = GraphBuilder.CreateUAV(ForegroundVelocity);
-		PassParameters->bDrawSilhouettes            = Settings.bDrawSilhouettes ? 1 : 0;
-		PassParameters->bDrawCreases                = Settings.bDrawCreases ? 1 : 0;
-		PassParameters->CreaseColor                 = FVector3f(Settings.CreaseColor.R, Settings.CreaseColor.G, Settings.CreaseColor.B);
-		PassParameters->SilhouetteColor             = FVector3f(Settings.SilhouetteColor.R, Settings.SilhouetteColor.G, Settings.SilhouetteColor.B);
 		PassParameters->SampleLocalPosition         = SampleLocalPosition;
-		PassParameters->RenderPixelsPerDisplayPixel = RenderPixelsPerDisplayPixel;
-		PassParameters->CreaseThickness             = Settings.CreaseThickness * MeanRenderPixelsPerDisplayPixel;
-		PassParameters->SilhouetteThickness         = Settings.SilhouetteThickness * MeanRenderPixelsPerDisplayPixel;
-		PassParameters->CoTriggerThreshold          = Settings.CoTriggerThreshold;
-		PassParameters->SlopeStandardErrorThreshold = Settings.SlopeStandardErrorThreshold;
-		PassParameters->DistinctSampleScale         = FMath::Min(1.0f, Settings.EstimatorDecay * float(FMath::Max(ViewInfo.TemporalJitterSequenceLength, 1)));
-		PassParameters->SaturatedSampleCount        = 1.0f / Settings.EstimatorDecay;
-		PassParameters->DebugView                   = static_cast<uint32>(FMath::Max(Settings.DebugView, 0));
 		PassParameters->RenderTargets[0]            = Output.GetRenderTargetBinding();
 
 		TShaderMapRef<FThinOutlinePS> PixelShader(GetGlobalShaderMap(View.GetFeatureLevel()));
@@ -401,6 +453,63 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 			nullptr,
 			TStaticDepthStencilState<true, CF_Always>::GetRHI());
 	}
+
+	return MoveTemp(Output);
+}
+
+FScreenPassTexture FThinOutlineSceneViewExtension::AddAfterUpscalerPass_RenderThread(
+	FRDGBuilder& GraphBuilder,
+	const FSceneView& View,
+	const FPostProcessMaterialInputs& Inputs)
+{
+	const FScreenPassTexture SceneColor = FScreenPassTexture::CopyFromSlice(GraphBuilder, Inputs.GetInput(EPostProcessMaterialInput::SceneColor));
+	const ThinOutline::FFrameRecords* FrameRecords = GraphBuilder.Blackboard.Get<ThinOutline::FFrameRecords>();
+	const ThinOutline::FViewRecords* ViewRecords = FrameRecords
+		? FrameRecords->Views.FindByPredicate([&View](const ThinOutline::FViewRecords& Entry) { return Entry.View == &View; })
+		: nullptr;
+	if (!SceneColor.IsValid() || !Inputs.SceneTextures.SceneTextures || !ViewRecords)
+	{
+		return Inputs.ReturnUntouchedSceneColorForPostProcessing(GraphBuilder);
+	}
+
+	const FViewInfo& ViewInfo = static_cast<const FViewInfo&>(View);
+	const FThinOutlineRenderSettings& Settings = RenderSettings_RenderThread;
+
+	// The temporal upscaler's output; without one, the view rect.
+	const FIntPoint DisplaySize = SceneColor.ViewRect.Size();
+
+	RDG_EVENT_SCOPE_STAT(GraphBuilder, ThinOutline, "ThinOutline.AfterUpscaler %dx%d", DisplaySize.X, DisplaySize.Y);
+
+	FScreenPassRenderTarget Output = Inputs.OverrideOutput;
+	if (!Output.IsValid())
+	{
+		Output = FScreenPassRenderTarget::CreateFromInput(GraphBuilder, SceneColor, View.GetOverwriteLoadAction(), TEXT("ThinOutline.SceneColor"));
+	}
+
+	const FScreenPassTextureViewport InputViewport(SceneColor);
+	const FScreenPassTextureViewport OutputViewport(Output);
+
+	FThinOutlineAfterUpscalerPS::FParameters* PassParameters = GraphBuilder.AllocParameters<FThinOutlineAfterUpscalerPS::FParameters>();
+	PassParameters->View                   = View.ViewUniformBuffer;
+	PassParameters->SceneTexturesStruct    = Inputs.SceneTextures.SceneTextures;
+	PassParameters->Substrate              = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
+	PassParameters->EdgeCheck              = ThinOutline::GetEdgeCheckParameters(Settings);
+	PassParameters->Composite              = ThinOutline::GetCompositeParameters(Settings, ViewInfo, ViewRecords->Textures, DisplaySize);
+	PassParameters->Input                  = GetScreenPassTextureViewportParameters(InputViewport);
+	PassParameters->Output                 = GetScreenPassTextureViewportParameters(OutputViewport);
+	PassParameters->InputSceneColorTexture = SceneColor.Texture;
+	PassParameters->RenderTargets[0]       = Output.GetRenderTargetBinding();
+
+	TShaderMapRef<FThinOutlineAfterUpscalerPS> PixelShader(GetGlobalShaderMap(View.GetFeatureLevel()));
+
+	AddDrawScreenPass(
+		GraphBuilder,
+		RDG_EVENT_NAME("ThinOutline.CompositeAfterUpscaler"),
+		View,
+		OutputViewport,
+		InputViewport,
+		PixelShader,
+		PassParameters);
 
 	return MoveTemp(Output);
 }

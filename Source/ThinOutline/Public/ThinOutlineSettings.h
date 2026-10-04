@@ -19,11 +19,20 @@ public:
 	UThinOutlineSettings(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
 	/**
-	 * Draws silhouette and crease outlines into scene color at rendering resolution, before TSR/TAA/third party upscalers.
+	 * Draws silhouette and crease outlines into scene color, by default at rendering resolution before TSR/TAA/third party upscalers.
 	 * The edges are reconstructed over time from the jittered G-buffer edge checks, so they need temporal anti-aliasing.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "General", meta = (ConsoleVariable = "r.ThinOutline.Enable", DisplayName = "Enable Outlines"))
 	bool bEnable;
+
+	/**
+	 * Draw the outline at display resolution after the temporal upscaler (and after depth of field, motion blur and translucency, before
+	 * bloom and tonemapping) instead of at rendering resolution before it. Each display pixel gets the exact coverage of the outline band,
+	 * so the outline does not go through the upscaler's history, and depth and velocity are left untouched. The edge records are kept at
+	 * rendering resolution before the upscaler either way.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "General", meta = (ConsoleVariable = "r.ThinOutline.DrawAfterUpscaler"))
+	bool bDrawAfterUpscaler;
 
 	/** Draw silhouette outlines. Their records are kept when off, so turning them back on shows them at once. */
 	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette", DisplayName = "Draw Silhouettes"))

@@ -4,4 +4,5 @@
 
 IMPLEMENT_GLOBAL_SHADER(FThinOutlineRecordCS, "/Plugin/ThinOutline/Private/ThinOutlineRecord.usf", "MainCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FThinOutlinePS, "/Plugin/ThinOutline/Private/ThinOutline.usf", "MainPS", SF_Pixel);
+IMPLEMENT_GLOBAL_SHADER(FThinOutlineAfterUpscalerPS, "/Plugin/ThinOutline/Private/ThinOutline.usf", "AfterUpscalerPS", SF_Pixel);
 IMPLEMENT_GLOBAL_SHADER(FThinOutlineForegroundPS, "/Plugin/ThinOutline/Private/ThinOutlineForeground.usf", "MainPS", SF_Pixel);

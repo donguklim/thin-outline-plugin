@@ -89,8 +89,29 @@ public:
 	}
 };
 
-// Reconstructs the edges from the edge records and composites the outline into scene color. Also picks the
-// foreground depth and velocity for the pixels painted with a silhouette.
+// Edge records and drawing settings shared by the two composite passes (ThinOutline.usf).
+BEGIN_SHADER_PARAMETER_STRUCT(FThinOutlineCompositeParameters, )
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, HorizontalA)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, HorizontalB)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, VerticalA)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, VerticalB)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, SilhouetteForeground)
+	SHADER_PARAMETER(uint32, bDrawSilhouettes)
+	SHADER_PARAMETER(uint32, bDrawCreases)
+	SHADER_PARAMETER(FVector3f, CreaseColor)
+	SHADER_PARAMETER(FVector3f, SilhouetteColor)
+	SHADER_PARAMETER(FVector2f, RenderPixelsPerDisplayPixel)
+	SHADER_PARAMETER(float, CreaseThickness)
+	SHADER_PARAMETER(float, SilhouetteThickness)
+	SHADER_PARAMETER(float, CoTriggerThreshold)
+	SHADER_PARAMETER(float, SlopeStandardErrorThreshold)
+	SHADER_PARAMETER(float, DistinctSampleScale)
+	SHADER_PARAMETER(float, SaturatedSampleCount)
+	SHADER_PARAMETER(uint32, DebugView)
+END_SHADER_PARAMETER_STRUCT()
+
+// Reconstructs the edges from the edge records and composites the outline into scene color at rendering resolution,
+// before the temporal upscaler. Also picks the foreground depth and velocity for the pixels painted with a silhouette.
 class FThinOutlinePS : public FGlobalShader
 {
 public:
@@ -102,29 +123,39 @@ public:
 		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSceneTextureUniformParameters, SceneTexturesStruct)
 		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSubstrateGlobalUniformParameters, Substrate)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineEdgeCheckParameters, EdgeCheck)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineCompositeParameters, Composite)
 		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Input)
 		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Output)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, InputSceneColorTexture)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, HorizontalA)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, HorizontalB)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, VerticalA)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, VerticalB)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, SilhouetteForeground)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, RWForegroundDeviceZ)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWForegroundVelocity)
-		SHADER_PARAMETER(uint32, bDrawSilhouettes)
-		SHADER_PARAMETER(uint32, bDrawCreases)
-		SHADER_PARAMETER(FVector3f, CreaseColor)
-		SHADER_PARAMETER(FVector3f, SilhouetteColor)
 		SHADER_PARAMETER(FVector2f, SampleLocalPosition)
-		SHADER_PARAMETER(FVector2f, RenderPixelsPerDisplayPixel)
-		SHADER_PARAMETER(float, CreaseThickness)
-		SHADER_PARAMETER(float, SilhouetteThickness)
-		SHADER_PARAMETER(float, CoTriggerThreshold)
-		SHADER_PARAMETER(float, SlopeStandardErrorThreshold)
-		SHADER_PARAMETER(float, DistinctSampleScale)
-		SHADER_PARAMETER(float, SaturatedSampleCount)
-		SHADER_PARAMETER(uint32, DebugView)
+		RENDER_TARGET_BINDING_SLOTS()
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+// r.ThinOutline.DrawAfterUpscaler: composites the outline reconstructed from the edge records into scene color at display
+// resolution, after the temporal upscaler.
+class FThinOutlineAfterUpscalerPS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FThinOutlineAfterUpscalerPS);
+	SHADER_USE_PARAMETER_STRUCT(FThinOutlineAfterUpscalerPS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSceneTextureUniformParameters, SceneTexturesStruct)
+		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSubstrateGlobalUniformParameters, Substrate)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineEdgeCheckParameters, EdgeCheck)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineCompositeParameters, Composite)
+		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Input)
+		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Output)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, InputSceneColorTexture)
 		RENDER_TARGET_BINDING_SLOTS()
 	END_SHADER_PARAMETER_STRUCT()
 

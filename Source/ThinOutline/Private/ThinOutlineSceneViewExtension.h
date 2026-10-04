@@ -12,6 +12,7 @@ struct FScreenPassTexture;
 /** Snapshot of the outline settings, gathered on the game thread once per view family. */
 struct FThinOutlineRenderSettings
 {
+	bool bDrawAfterUpscaler = false;
 	bool bDrawSilhouettes = true;
 	bool bDrawCreases = true;
 	FLinearColor SilhouetteColor = FLinearColor::Black;
@@ -75,6 +76,8 @@ struct FThinOutlineHistory
  * resolution before the temporal upscaler (TAA/TSR/third party) runs. The edges are reconstructed from per-pixel
  * temporal records of the jittered G-buffer edge checks. Pixels painted with a silhouette get the foreground's depth
  * and velocity, so the upscaler moves the outline with the foreground.
+ * With r.ThinOutline.DrawAfterUpscaler, the records are still updated at BeforeDOF, but the outline is drawn after the
+ * MotionBlur pass instead, at display resolution after the upscaler.
  */
 class FThinOutlineSceneViewExtension : public FSceneViewExtensionBase
 {
@@ -97,7 +100,14 @@ protected:
 	virtual bool IsActiveThisFrame_Internal(const FSceneViewExtensionContext& Context) const override;
 
 private:
+	/** Updates the edge records, and draws the outline unless it is drawn after the upscaler. */
 	FScreenPassTexture AddOutlinePass_RenderThread(
+		FRDGBuilder& GraphBuilder,
+		const FSceneView& View,
+		const FPostProcessMaterialInputs& Inputs);
+
+	/** r.ThinOutline.DrawAfterUpscaler: draws the outline from the records AddOutlinePass_RenderThread left for the view. */
+	FScreenPassTexture AddAfterUpscalerPass_RenderThread(
 		FRDGBuilder& GraphBuilder,
 		const FSceneView& View,
 		const FPostProcessMaterialInputs& Inputs);
