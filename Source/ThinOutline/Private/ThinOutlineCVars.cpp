@@ -172,16 +172,17 @@ TAutoConsoleVariable<float> CVarThinOutlineCreaseHistoryDepthThreshold(
 TAutoConsoleVariable<int32> CVarThinOutlineCreaseHistoryCreaseTest(
 	TEXT("r.ThinOutline.Crease.HistoryCreaseTest"),
 	1,
-	TEXT("1 = a crease record is dropped after r.ThinOutline.Crease.HistoryCreaseTestFrames frames without a crease found at the\n")
-	TEXT("pixel along its axis (the crease measure above the keep level of r.ThinOutline.Crease.HistoryCreaseTestThreshold).\n")
+	TEXT("1 = a crease record is dropped after r.ThinOutline.Crease.HistoryFramesWithoutCrease frames without a crease found\n")
+	TEXT("at the pixel along its axis (the crease measure above the keep level of\n")
+	TEXT("r.ThinOutline.Crease.HistoryCreaseTestThreshold).\n")
 	TEXT("The depth test alone keeps records that slid along one depth-continuous surface (a foot's crease left on the floor\n")
 	TEXT("it stood on, a junction's crease carried onto a curved wall, copies spread over a face widening on screen).\n")
 	TEXT("0 = depth test only. Separate shader permutations.\n"),
 	ECVF_Default
 );
 
-TAutoConsoleVariable<int32> CVarThinOutlineCreaseHistoryCreaseTestFrames(
-	TEXT("r.ThinOutline.Crease.HistoryCreaseTestFrames"),
+TAutoConsoleVariable<int32> CVarThinOutlineCreaseHistoryFramesWithoutCrease(
+	TEXT("r.ThinOutline.Crease.HistoryFramesWithoutCrease"),
 	3,
 	TEXT("Frames without a crease found at a crease record's pixel after which r.ThinOutline.Crease.HistoryCreaseTest drops the\n")
 	TEXT("record; 0 = a whole jitter cycle (the temporal upscaler's jitter sequence length). Short, because a face that widens\n")

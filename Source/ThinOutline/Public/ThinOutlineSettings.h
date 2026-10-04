@@ -161,8 +161,8 @@ public:
 	 * widens on screen receives copies of the crease records next to it, which are drawn until dropped. A crease thinner than a pixel that is
 	 * found on fewer than about half the frames loses its records more often with a short limit.
 	 */
-	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.HistoryCreaseTestFrames", ClampMin = "0", UIMax = "32"))
-	int32 CreaseHistoryCreaseTestFrames;
+	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.HistoryFramesWithoutCrease", ClampMin = "0", UIMax = "32"))
+	int32 CreaseHistoryFramesWithoutCrease;
 
 	/**
 	 * Decay rate d of the edge records' running statistics. Samples are weighted by (1 - d)^age in frames, so a record that gets

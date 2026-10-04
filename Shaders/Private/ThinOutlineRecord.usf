@@ -65,7 +65,7 @@ float SilhouetteHistorySinAngle;
 float SilhouetteCreaseTakeoverSampleCount;
 // Keep level of the crease history test (CREASE_HISTORY_TEST): the crease thresholds scaled by
 // r.ThinOutline.Crease.HistoryCreaseTestThreshold; and the frames without a crease after which a crease record is
-// dropped (r.ThinOutline.Crease.HistoryCreaseTestFrames, or the jitter sequence length).
+// dropped (r.ThinOutline.Crease.HistoryFramesWithoutCrease, or the jitter sequence length).
 float CreaseHistoryKeepRidgeThreshold;
 float CreaseHistoryKeepValleyThreshold;
 float CreaseHistoryMissLimit;
@@ -277,7 +277,7 @@ uint GetNearCreaseMask(FThinOutlineEdges Edges)
 
 // The crease history test of one axis's reprojected crease record (CREASE_HISTORY_TEST): its count of frames since a
 // crease was last found at the pixel along the axis restarts when one is found this frame, and the record is dropped
-// when the count reaches CreaseHistoryMissLimit (r.ThinOutline.Crease.HistoryCreaseTestFrames, 3; 0 = a jitter cycle).
+// when the count reaches CreaseHistoryMissLimit (r.ThinOutline.Crease.HistoryFramesWithoutCrease, 3; 0 = a jitter cycle).
 // The depth test cannot see a record that slid along one depth-continuous surface (a foot's crease left on the floor it
 // stood on, a junction's crease carried onto the curved wall next to it), since a crease joins two such surfaces by
 // definition. Nor copies: the history only shifts records, so on a face that widens on screen (turning toward the

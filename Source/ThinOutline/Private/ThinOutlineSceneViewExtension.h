@@ -34,7 +34,7 @@ struct FThinOutlineRenderSettings
 	float CreaseHistoryDepthThreshold = 0.0f;
 	bool bCreaseHistoryCreaseTest = true;
 	float CreaseHistoryCreaseTestThreshold = 0.0f;
-	int32 CreaseHistoryCreaseTestFrames = 0;
+	int32 CreaseHistoryFramesWithoutCrease = 0;
 	float SilhouetteHistoryDepthThreshold = 0.0f;
 	int32 HistoryReprojection = 0;
 	int32 DebugView = 0;
