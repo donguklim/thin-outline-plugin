@@ -12,6 +12,7 @@ UThinOutlineSettings::UThinOutlineSettings(const FObjectInitializer& ObjectIniti
 
 	// Keep in sync with the console variable defaults in ThinOutlineCVars.cpp.
 	bEnable = true;
+	bDrawSilhouettes = true;
 	SilhouetteColor = FLinearColor::Black;
 	SilhouetteThreshold = 0.01f;
 	SilhouetteScale = 50.0f;
@@ -22,6 +23,7 @@ UThinOutlineSettings::UThinOutlineSettings(const FObjectInitializer& ObjectIniti
 	bSilhouetteHistorySurfaceTurn = true;
 	SilhouetteHistoryDepthThreshold = 0.05f;
 	SilhouetteCreaseTakeoverSampleCount = 0.5f;
+	bDrawCreases = true;
 	CreaseColor = FLinearColor::Black;
 	CreaseRidgeThreshold = 0.25f;
 	CreaseValleyThreshold = 0.25f;

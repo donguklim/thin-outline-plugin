@@ -6,6 +6,10 @@
 
 extern TAutoConsoleVariable<int32> CVarThinOutlineEnable;
 
+// Draw silhouette / crease outlines (the records are kept either way)
+extern TAutoConsoleVariable<int32> CVarThinOutlineSilhouette;
+extern TAutoConsoleVariable<int32> CVarThinOutlineCrease;
+
 // 0 = composite the outline into scene color, 1..5 = debug views (see the CVar help)
 extern TAutoConsoleVariable<int32> CVarThinOutlineDebugView;
 

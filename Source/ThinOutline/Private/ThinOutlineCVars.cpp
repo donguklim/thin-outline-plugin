@@ -9,6 +9,22 @@ TAutoConsoleVariable<int32> CVarThinOutlineEnable(
 	ECVF_Default
 );
 
+TAutoConsoleVariable<int32> CVarThinOutlineSilhouette(
+	TEXT("r.ThinOutline.Silhouette"),
+	1,
+	TEXT("Draw silhouette outlines: 0/1. Silhouette records are still kept, so turning it back on shows them at once.\n")
+	TEXT("With 0, no pixel gets the foreground's depth and velocity. Debug views 3 and 5 follow it.\n"),
+	ECVF_Default
+);
+
+TAutoConsoleVariable<int32> CVarThinOutlineCrease(
+	TEXT("r.ThinOutline.Crease"),
+	1,
+	TEXT("Draw crease outlines: 0/1. Crease records are still kept, so turning it back on shows them at once.\n")
+	TEXT("Debug views 3 and 5 follow it.\n"),
+	ECVF_Default
+);
+
 TAutoConsoleVariable<int32> CVarThinOutlineDebugView(
 	TEXT("r.ThinOutline.DebugView"),
 	0,

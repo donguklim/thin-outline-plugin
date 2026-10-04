@@ -107,6 +107,8 @@ public:
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, SilhouetteForeground)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, RWForegroundDeviceZ)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWForegroundVelocity)
+		SHADER_PARAMETER(uint32, bDrawSilhouettes)
+		SHADER_PARAMETER(uint32, bDrawCreases)
 		SHADER_PARAMETER(FVector3f, CreaseColor)
 		SHADER_PARAMETER(FVector3f, SilhouetteColor)
 		SHADER_PARAMETER(FVector2f, SampleLocalPosition)

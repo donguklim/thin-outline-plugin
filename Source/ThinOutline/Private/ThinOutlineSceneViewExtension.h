@@ -12,6 +12,8 @@ struct FScreenPassTexture;
 /** Snapshot of the outline settings, gathered on the game thread once per view family. */
 struct FThinOutlineRenderSettings
 {
+	bool bDrawSilhouettes = true;
+	bool bDrawCreases = true;
 	FLinearColor SilhouetteColor = FLinearColor::Black;
 	FLinearColor CreaseColor = FLinearColor::Black;
 	float SilhouetteThreshold = 0.0f;

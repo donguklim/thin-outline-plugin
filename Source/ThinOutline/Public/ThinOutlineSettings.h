@@ -25,6 +25,10 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "General", meta = (ConsoleVariable = "r.ThinOutline.Enable", DisplayName = "Enable Outlines"))
 	bool bEnable;
 
+	/** Draw silhouette outlines. Their records are kept when off, so turning them back on shows them at once. */
+	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette", DisplayName = "Draw Silhouettes"))
+	bool bDrawSilhouettes;
+
 	/**
 	 * Silhouette outline color. Written into pre-exposed HDR scene color, so it does not depend on exposure, but it is still tonemapped.
 	 * Pixels painted with a silhouette also get the depth and velocity of the foreground, so the temporal upscaler moves the outline with it.
@@ -101,6 +105,10 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.CreaseTakeoverSampleCount", ClampMin = "0.0", UIMax = "1.0"))
 	float SilhouetteCreaseTakeoverSampleCount;
+
+	/** Draw crease outlines. Their records are kept when off, so turning them back on shows them at once. */
+	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease", DisplayName = "Draw Creases"))
+	bool bDrawCreases;
 
 	/** Crease outline color. Written into pre-exposed HDR scene color, so it does not depend on exposure, but it is still tonemapped. */
 	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (HideAlphaChannel))

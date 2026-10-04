@@ -83,6 +83,8 @@ bool FThinOutlineSceneViewExtension::IsActiveThisFrame_Internal(const FSceneView
 void FThinOutlineSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& InViewFamily)
 {
 	FThinOutlineRenderSettings Settings;
+	Settings.bDrawSilhouettes                    = CVarThinOutlineSilhouette.GetValueOnGameThread() != 0;
+	Settings.bDrawCreases                        = CVarThinOutlineCrease.GetValueOnGameThread() != 0;
 	Settings.SilhouetteColor                     = GetDefault<UThinOutlineSettings>()->SilhouetteColor;
 	Settings.CreaseColor                         = GetDefault<UThinOutlineSettings>()->CreaseColor;
 	Settings.SilhouetteThreshold                 = FMath::Max(0.0f, CVarThinOutlineSilhouetteThreshold.GetValueOnGameThread());
@@ -318,6 +320,8 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->SilhouetteForeground        = Records[SilhouetteForeground];
 		PassParameters->RWForegroundDeviceZ         = GraphBuilder.CreateUAV(ForegroundDeviceZ);
 		PassParameters->RWForegroundVelocity        = GraphBuilder.CreateUAV(ForegroundVelocity);
+		PassParameters->bDrawSilhouettes            = Settings.bDrawSilhouettes ? 1 : 0;
+		PassParameters->bDrawCreases                = Settings.bDrawCreases ? 1 : 0;
 		PassParameters->CreaseColor                 = FVector3f(Settings.CreaseColor.R, Settings.CreaseColor.G, Settings.CreaseColor.B);
 		PassParameters->SilhouetteColor             = FVector3f(Settings.SilhouetteColor.R, Settings.SilhouetteColor.G, Settings.SilhouetteColor.B);
 		PassParameters->SampleLocalPosition         = SampleLocalPosition;

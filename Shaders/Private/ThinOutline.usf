@@ -21,7 +21,8 @@
 	with the clearly smaller slope standard error wins, otherwise the one with the smaller absolute slope.
 	A crease band is centered on the edge. A silhouette band lies on the background side of the edge only, so the
 	outline wraps around the foreground. Silhouette candidates take priority over creases. An axis whose own record is
-	a silhouette record draws no crease.
+	a silhouette record draws no crease. r.ThinOutline.Silhouette / r.ThinOutline.Crease 0 skip that type's candidates
+	(the axis rule above still holds with silhouettes off).
 
 	The outline alpha is the edge strength times the fraction of the display pixel (temporal upscaler output) under
 	this frame's sample, clipped to this rendering pixel, that the outline band covers.
@@ -50,6 +51,9 @@ Texture2D<float4> SilhouetteForeground;
 RWTexture2D<float> RWForegroundDeviceZ;
 RWTexture2D<float4> RWForegroundVelocity;
 
+// r.ThinOutline.Silhouette, r.ThinOutline.Crease: draw that outline type (the records are kept either way).
+uint bDrawSilhouettes;
+uint bDrawCreases;
 float3 CreaseColor;
 float3 SilhouetteColor;
 // This frame's G-buffer sample position inside its rendering pixel, in pixel-local coordinates [0, 1]^2.
@@ -313,7 +317,7 @@ void MainPS(
 	bool bSilhouette = true;
 
 	BRANCH
-	if (HasNearRecordOfType(HorizontalRecords, EDGE_SILHOUETTE) || HasNearRecordOfType(VerticalRecords, EDGE_SILHOUETTE))
+	if (bDrawSilhouettes != 0 && (HasNearRecordOfType(HorizontalRecords, EDGE_SILHOUETTE) || HasNearRecordOfType(VerticalRecords, EDGE_SILHOUETTE)))
 	{
 		Horizontal = GetCandidate(EDGE_SILHOUETTE, HorizontalRecords);
 		Vertical = GetCandidate(EDGE_SILHOUETTE, VerticalRecords);
@@ -325,7 +329,7 @@ void MainPS(
 		bSilhouette = false;
 
 		BRANCH
-		if (HasNearRecordOfType(HorizontalRecords, EDGE_CREASE) || HasNearRecordOfType(VerticalRecords, EDGE_CREASE))
+		if (bDrawCreases != 0 && (HasNearRecordOfType(HorizontalRecords, EDGE_CREASE) || HasNearRecordOfType(VerticalRecords, EDGE_CREASE)))
 		{
 			Horizontal = GetCandidate(EDGE_CREASE, HorizontalRecords);
 			Vertical = GetCandidate(EDGE_CREASE, VerticalRecords);
