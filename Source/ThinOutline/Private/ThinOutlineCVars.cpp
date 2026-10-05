@@ -224,7 +224,7 @@ TAutoConsoleVariable<float> CVarThinOutlineEstimatorDecay(
 
 TAutoConsoleVariable<float> CVarThinOutlineEstimatorCoTriggerThreshold(
 	TEXT("r.ThinOutline.Estimator.CoTriggerThreshold"),
-	0.05f,
+	1.0f,
 	TEXT("Maximum fraction of a record's samples taken on frames where both checks of its axis fired (more than one edge\n")
 	TEXT("across the pixel). Records above it are left out of the pooled fit of the pixel and its neighbours.\n"),
 	ECVF_Default
