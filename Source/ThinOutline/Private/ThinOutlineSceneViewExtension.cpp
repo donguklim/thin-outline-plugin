@@ -92,8 +92,8 @@ namespace ThinOutline
 		Parameters.SilhouetteThickness         = Settings.SilhouetteThickness * MeanRenderPixelsPerDisplayPixel;
 		Parameters.CoTriggerThreshold          = Settings.CoTriggerThreshold;
 		Parameters.SlopeStandardErrorThreshold = Settings.SlopeStandardErrorThreshold;
-		Parameters.bCreaseSpatialFilter        = Settings.bCreaseSpatialFilter ? 1 : 0;
-		Parameters.CreaseSpatialFilterSigma    = Settings.CreaseSpatialFilterSigma;
+		Parameters.bSpatialFilter              = Settings.bSpatialFilter ? 1 : 0;
+		Parameters.SpatialFilterSigma          = Settings.SpatialFilterSigma;
 		Parameters.DistinctSampleScale         = FMath::Min(1.0f, Settings.EstimatorDecay * float(FMath::Max(ViewInfo.TemporalJitterSequenceLength, 1)));
 		Parameters.SaturatedSampleCount        = 1.0f / Settings.EstimatorDecay;
 		Parameters.DebugView                   = static_cast<uint32>(FMath::Max(Settings.DebugView, 0));
@@ -172,8 +172,8 @@ void FThinOutlineSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& InV
 	// At most 1: a crease sample then always counts as a crease found.
 	Settings.CreaseHistoryCreaseTestThreshold    = FMath::Clamp(CVarThinOutlineCreaseHistoryCreaseTestThreshold.GetValueOnGameThread(), 0.0f, 1.0f);
 	Settings.CreaseHistoryFramesWithoutCrease    = FMath::Max(0, CVarThinOutlineCreaseHistoryFramesWithoutCrease.GetValueOnGameThread());
-	Settings.bCreaseSpatialFilter                = CVarThinOutlineCreaseSpatialFilter.GetValueOnGameThread() != 0;
-	Settings.CreaseSpatialFilterSigma            = FMath::Max(0.001f, CVarThinOutlineCreaseSpatialFilterSigma.GetValueOnGameThread());
+	Settings.bSpatialFilter                      = CVarThinOutlineSpatialFilter.GetValueOnGameThread() != 0;
+	Settings.SpatialFilterSigma                  = FMath::Max(0.001f, CVarThinOutlineSpatialFilterSigma.GetValueOnGameThread());
 	Settings.SilhouetteHistoryDepthThreshold     = FMath::Max(0.0f, CVarThinOutlineSilhouetteHistoryDepthThreshold.GetValueOnGameThread());
 	Settings.HistoryReprojection                 = FMath::Clamp(CVarThinOutlineEstimatorHistoryReprojection.GetValueOnGameThread(), 0, 3);
 	Settings.DebugView                           = CVarThinOutlineDebugView.GetValueOnGameThread();
