@@ -68,6 +68,11 @@ float CreaseThickness;
 float SilhouetteThickness;
 float CoTriggerThreshold;
 float SlopeStandardErrorThreshold;
+// r.ThinOutline.Crease.SpatialFilter: a drawn crease edge takes the slope through the center crossings of the pooled crease
+// fits of the two pixels across its axis and its own (ApplyCreaseSpatialFilter).
+uint bCreaseSpatialFilter;
+// Scale, in rendering pixels, of the test that the three crossings line up.
+float CreaseSpatialFilterSigma;
 // The jitter sequence repeats every L frames, so a record that gets a sample on a fraction f of the frames holds about
 // f * L distinct jitter positions, while its sample count is f / d: distinct = count * min(1, d * L).
 float DistinctSampleScale;
@@ -101,6 +106,33 @@ FThinOutlineRecord LoadRecord(uint Axis, int2 ViewportPos, out uint EdgeType)
 	// Loaded unconditionally, in parallel with the record: waiting for the type first costs a second round trip.
 	const float2 KeptRatios = SilhouetteForeground.Load(Texel).xy;
 	Record.KeptRatio = Axis == AXIS_HORIZONTAL ? KeptRatios.x : KeptRatios.y;
+	return Record;
+}
+
+// A pixel's crease record of one axis, without the kept ratio (only silhouette records have one). Outside the view,
+// or a silhouette record: empty.
+FThinOutlineRecord LoadCreaseRecord(uint Axis, int2 ViewportPos)
+{
+	if (any(ViewportPos < 0) || any(ViewportPos >= int2(View.ViewSizeAndInvSize.xy)))
+	{
+		return GetEmptyRecord();
+	}
+
+	const int3 Texel = int3(ViewportPos, 0);
+	uint EdgeType;
+	FThinOutlineRecord Record;
+	if (Axis == AXIS_HORIZONTAL)
+	{
+		Record = UnpackRecord(HorizontalA.Load(Texel), HorizontalB.Load(Texel), EdgeType);
+	}
+	else
+	{
+		Record = UnpackRecord(VerticalA.Load(Texel), VerticalB.Load(Texel), EdgeType);
+	}
+	if (EdgeType != EDGE_CREASE)
+	{
+		Record = GetEmptyRecord();
+	}
 	return Record;
 }
 
@@ -351,6 +383,80 @@ FThinOutlineSelection SelectEdge(FThinOutlineAxisRecords HorizontalRecords, FThi
 	return Selection;
 }
 
+// The pooled crease fit of the pixel Across steps away across the axis (the row above or below for the horizontal axis),
+// pooled as GetCreaseFitRecord pools it for that pixel, and the pooled record's co-trigger ratio.
+FThinOutlineEdgeFit GetAcrossCreaseFit(uint Axis, int2 ViewportPos, int Across, out float CoTriggerRatio)
+{
+	const int2 AxisStep = GetAxisStep(Axis);
+	const int2 Center = ViewportPos + Across * AxisStep.yx;
+
+	FThinOutlineRecord Pooled = GetEmptyRecord();
+	UNROLL
+	for (int Along = -1; Along <= 1; ++Along)
+	{
+		PoolRecord(Pooled, LoadCreaseRecord(Axis, Center + Along * AxisStep), float(-Along));
+	}
+	CoTriggerRatio = Pooled.CoTriggerRatio;
+	return FitEdge(Pooled, DistinctSampleScale);
+}
+
+// Standard errors below this (in pixels) count as this, so a perfect fit gets a finite weight.
+#define THIN_OUTLINE_MIN_STANDARD_ERROR 1.0e-3
+
+// r.ThinOutline.Crease.SpatialFilter, for the selected crease edge. The slope of one pixel's fit is its least certain
+// part: its samples span only one pixel across the axis. Worse, along a static edge every pixel holds the same samples
+// (the jitter is global), so all share one slope error, which the outline shows as a sawtooth below 100% screen
+// percentage when drawn after the upscaler; averaging the neighbours' lines or slopes keeps that error. The position of
+// the edge at a pixel's center (its center crossing) is reliable, and the neighbours' crossings do line up. So the slope
+// is refitted through the center crossings of the pooled crease fits of the two pixels across the axis and the pixel's
+// own: a weighted least-squares line through the three points (weights: inverse variance of the crossing, and for the
+// neighbours the co-trigger factor and a collinearity gate), with the pixel's own slope as a prior weighted by its own
+// inverse variance, so the line falls back to the own slope as the gate closes. The gate compares the own crossing with
+// the midpoint of the neighbours' (0 on a straight edge of any slope, about 0.5 for a parallel edge one pixel over,
+// large at a corner): no slope enters it, so the shared slope error cannot. With a neighbour on one side only, the own
+// fit is kept. The own center crossing is kept in all cases. Docs/Design/Spatial-Filter-Positions-Not-Lines.md.
+void ApplyCreaseSpatialFilter(inout FThinOutlineSelection Selection, int2 ViewportPos)
+{
+	const uint Axis = Selection.bVertical ? AXIS_VERTICAL : AXIS_HORIZONTAL;
+	const FThinOutlineEdgeFit Own = Selection.Selected.Fit;
+	const float OwnCrossing = Own.Intercept + 0.5 * Own.Slope;
+
+	float BeforeRatio;
+	float AfterRatio;
+	const FThinOutlineEdgeFit Before = GetAcrossCreaseFit(Axis, ViewportPos, -1, BeforeRatio);
+	const FThinOutlineEdgeFit After = GetAcrossCreaseFit(Axis, ViewportPos, 1, AfterRatio);
+	if (!Before.bValid || !After.bValid)
+	{
+		return;
+	}
+
+	// The neighbours' center crossings are in this pixel's coordinates already (no offset along the axis); they sit at
+	// v = -0.5 and v = 1.5.
+	const float BeforeCrossing = Before.Intercept + 0.5 * Before.Slope;
+	const float AfterCrossing = After.Intercept + 0.5 * After.Slope;
+	const float Collinearity = 0.5 * (BeforeCrossing + AfterCrossing) - OwnCrossing;
+	const float Gate = exp(-Pow2(Collinearity / CreaseSpatialFilterSigma));
+
+	const float BeforeWeight = Gate * saturate(1.0 - BeforeRatio) / Pow2(max(Before.CrossingStandardError, THIN_OUTLINE_MIN_STANDARD_ERROR));
+	const float OwnWeight = 1.0 / Pow2(max(Own.CrossingStandardError, THIN_OUTLINE_MIN_STANDARD_ERROR));
+	const float AfterWeight = Gate * saturate(1.0 - AfterRatio) / Pow2(max(After.CrossingStandardError, THIN_OUTLINE_MIN_STANDARD_ERROR));
+	// The edge line's slope has twice the record line's standard error.
+	const float SlopeWeight = 1.0 / Pow2(max(2.0 * Own.SlopeStandardError, THIN_OUTLINE_MIN_STANDARD_ERROR));
+
+	const float TotalWeight = BeforeWeight + OwnWeight + AfterWeight;
+	const float MeanV = (-0.5 * BeforeWeight + 0.5 * OwnWeight + 1.5 * AfterWeight) / TotalWeight;
+	const float MeanU = (BeforeWeight * BeforeCrossing + OwnWeight * OwnCrossing + AfterWeight * AfterCrossing) / TotalWeight;
+	const float3 DeltaV = float3(-0.5, 0.5, 1.5) - MeanV;
+	const float3 DeltaU = float3(BeforeCrossing, OwnCrossing, AfterCrossing) - MeanU;
+	const float3 Weights = float3(BeforeWeight, OwnWeight, AfterWeight);
+	const float Svv = dot(Weights, DeltaV * DeltaV);
+	const float Svu = dot(Weights, DeltaV * DeltaU);
+	const float Slope = (Svu + SlopeWeight * Own.Slope) / (Svv + SlopeWeight);
+
+	Selection.Selected.Fit.Slope = Slope;
+	Selection.Selected.Fit.Intercept = OwnCrossing - 0.5 * Slope;
+}
+
 // Area of the selected edge's outline band inside [RectMin, RectMax], in pixel-local coordinates of the rendering pixel.
 float GetSelectedBandArea(FThinOutlineSelection Selection, float2 RectMin, float2 RectMax)
 {
@@ -416,7 +522,12 @@ void MainPS(
 
 	const FThinOutlineAxisRecords HorizontalRecords = LoadAxisRecords(AXIS_HORIZONTAL, ViewportPos);
 	const FThinOutlineAxisRecords VerticalRecords = LoadAxisRecords(AXIS_VERTICAL, ViewportPos);
-	const FThinOutlineSelection Selection = SelectEdge(HorizontalRecords, VerticalRecords);
+	FThinOutlineSelection Selection = SelectEdge(HorizontalRecords, VerticalRecords);
+	BRANCH
+	if (bCreaseSpatialFilter != 0 && Selection.bValid && !Selection.bSilhouette)
+	{
+		ApplyCreaseSpatialFilter(Selection, ViewportPos);
+	}
 
 	float Alpha = 0.0;
 	float ForegroundDeviceZ = 0.0;
@@ -537,7 +648,12 @@ void AfterUpscalerPS(
 		for (int X = FirstPixel.x; X <= LastPixel.x; ++X)
 		{
 			const int2 ViewportPos = int2(X, Y);
-			const FThinOutlineSelection Selection = SelectEdge(LoadAxisRecords(AXIS_HORIZONTAL, ViewportPos), LoadAxisRecords(AXIS_VERTICAL, ViewportPos));
+			FThinOutlineSelection Selection = SelectEdge(LoadAxisRecords(AXIS_HORIZONTAL, ViewportPos), LoadAxisRecords(AXIS_VERTICAL, ViewportPos));
+			BRANCH
+			if (bCreaseSpatialFilter != 0 && Selection.bValid && !Selection.bSilhouette)
+			{
+				ApplyCreaseSpatialFilter(Selection, ViewportPos);
+			}
 			if (Selection.bValid)
 			{
 				// The overlap, in pixel-local coordinates of the rendering pixel.

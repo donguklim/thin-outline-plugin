@@ -36,6 +36,8 @@ struct FThinOutlineRenderSettings
 	bool bCreaseHistoryCreaseTest = true;
 	float CreaseHistoryCreaseTestThreshold = 0.0f;
 	int32 CreaseHistoryFramesWithoutCrease = 0;
+	bool bCreaseSpatialFilter = true;
+	float CreaseSpatialFilterSigma = 0.25f;
 	float SilhouetteHistoryDepthThreshold = 0.0f;
 	int32 HistoryReprojection = 0;
 	int32 DebugView = 0;

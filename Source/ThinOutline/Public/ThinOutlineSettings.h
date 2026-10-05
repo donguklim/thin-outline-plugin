@@ -174,6 +174,22 @@ public:
 	int32 CreaseHistoryFramesWithoutCrease;
 
 	/**
+	 * A drawn crease edge takes its slope from the edge's positions in the two pixels across its axis and its own, as far as the three line
+	 * up, keeping its own position. One pixel's slope is the least certain part of its fit, and along a static edge every pixel has the same
+	 * slope error, which shows as a sawtooth below 100% screen percentage when drawing after the upscaler.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.SpatialFilter", DisplayName = "Crease Spatial Filter"))
+	bool bCreaseSpatialFilter;
+
+	/**
+	 * Scale, in rendering pixels, of the spatial filter's test that the edge positions of the two pixels across the axis line up with the
+	 * pixel's own: the neighbours weigh exp(-(d / sigma)^2), d the distance of the pixel's position from the midpoint of theirs (0 on a
+	 * straight edge of any slope, about 0.5 for a parallel edge one pixel over, more at a corner).
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.SpatialFilterSigma", ClampMin = "0.001", UIMax = "1.0"))
+	float CreaseSpatialFilterSigma;
+
+	/**
 	 * Decay rate d of the edge records' running statistics. Samples are weighted by (1 - d)^age in frames, so a record that gets
 	 * a sample every frame holds about 1 / d samples. Lower is steadier, higher follows changes faster.
 	 */

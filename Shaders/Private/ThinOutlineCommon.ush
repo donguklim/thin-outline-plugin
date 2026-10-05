@@ -449,6 +449,9 @@ struct FThinOutlineEdgeFit
 	float Slope;
 	// Standard error of the slope b of the OLS line u = a + b v through the record (not of the doubled edge line).
 	float SlopeStandardError;
+	// Standard error of the edge line's position at the pixel's center (v = 0.5), in pixels: that of the record line's
+	// value there, doubled like the line. The least uncertain point of the line, and uncorrelated with its slope.
+	float CrossingStandardError;
 };
 
 // DistinctSampleScale converts the decayed sample count into the number of distinct jitter positions behind it, which is
@@ -470,6 +473,8 @@ FThinOutlineEdgeFit FitEdge(FThinOutlineRecord Record, float DistinctSampleScale
 
 	const float ResidualVariance = max(Record.Variance.x - Record.Covariance * B, 0.0) * SampleCount / (SampleCount - 2.0);
 	Fit.SlopeStandardError = sqrt(ResidualVariance / (SampleCount * Record.Variance.y));
+	const float CenterOffset = 0.5 - Record.Mean.y;
+	Fit.CrossingStandardError = 2.0 * sqrt(ResidualVariance / SampleCount * (1.0 + CenterOffset * CenterOffset / Record.Variance.y));
 
 	// The record fits the trapezoid midline u = 0.5 + E / 2.
 	Fit.Intercept = 2.0 * A - 1.0;

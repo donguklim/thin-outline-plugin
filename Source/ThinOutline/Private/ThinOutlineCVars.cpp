@@ -214,6 +214,26 @@ TAutoConsoleVariable<float> CVarThinOutlineCreaseHistoryCreaseTestThreshold(
 	ECVF_Default
 );
 
+TAutoConsoleVariable<int32> CVarThinOutlineCreaseSpatialFilter(
+	TEXT("r.ThinOutline.Crease.SpatialFilter"),
+	1,
+	TEXT("1 = a drawn crease edge takes its slope from the edge's positions in the two pixels across its axis (the rows above\n")
+	TEXT("and below for a near-vertical edge) and its own, as far as the three line up, keeping its own position. One pixel's\n")
+	TEXT("slope is the least certain part of its fit, and along a static edge every pixel has the same slope error, which\n")
+	TEXT("shows as a sawtooth below 100% screen percentage when drawing after the upscaler. 0 = each pixel's own slope.\n"),
+	ECVF_Default
+);
+
+TAutoConsoleVariable<float> CVarThinOutlineCreaseSpatialFilterSigma(
+	TEXT("r.ThinOutline.Crease.SpatialFilterSigma"),
+	0.25f,
+	TEXT("Scale, in rendering pixels, of r.ThinOutline.Crease.SpatialFilter's test that the edge positions of the two pixels\n")
+	TEXT("across the axis line up with the pixel's own: the neighbours weigh exp(-(d / sigma)^2), d the distance of the\n")
+	TEXT("pixel's position from the midpoint of theirs (0 on a straight edge of any slope, about 0.5 for a parallel edge one\n")
+	TEXT("pixel over, more at a corner).\n"),
+	ECVF_Default
+);
+
 TAutoConsoleVariable<float> CVarThinOutlineEstimatorDecay(
 	TEXT("r.ThinOutline.Estimator.Decay"),
 	0.04f,
