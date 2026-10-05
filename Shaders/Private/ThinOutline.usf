@@ -212,12 +212,16 @@ FThinOutlineRecord GetCreaseFitRecord(FThinOutlineAxisRecords AxisRecords)
 	return Pooled;
 }
 
-// Whether the record at Index is a silhouette record whose background is on the +u side (its samples came through the
-// right or bottom check: kept ratio below 0.5).
+// Whether a record is a silhouette record whose background is on the +u side (its samples came through the right or
+// bottom check: kept ratio below 0.5).
+bool IsSilhouetteRecordOfSide(FThinOutlineRecord Record, uint EdgeType, bool bBackgroundAlongU)
+{
+	return EdgeType == EDGE_SILHOUETTE && Record.SampleCount > 0.0 && (Record.KeptRatio < 0.5) == bBackgroundAlongU;
+}
+
 bool IsSilhouetteOfSide(FThinOutlineAxisRecords AxisRecords, int Index, bool bBackgroundAlongU)
 {
-	const FThinOutlineRecord Record = AxisRecords.Records[Index];
-	return AxisRecords.EdgeTypes[Index] == EDGE_SILHOUETTE && Record.SampleCount > 0.0 && (Record.KeptRatio < 0.5) == bBackgroundAlongU;
+	return IsSilhouetteRecordOfSide(AxisRecords.Records[Index], AxisRecords.EdgeTypes[Index], bBackgroundAlongU);
 }
 
 // The silhouette records of one background side, pooled: those of the pixel, of the two pixels toward the foreground
@@ -243,6 +247,53 @@ FThinOutlineRecord GetSilhouetteFitRecord(FThinOutlineAxisRecords AxisRecords, b
 		{
 			PoolRecord(Pooled, AxisRecords.Records[Index], float(OWN_INDEX - Index));
 		}
+	}
+	return Pooled;
+}
+
+// GetSilhouetteFitRecord's pool for the pixel at Center when the background side is already known: only the four cells
+// of that side are loaded (the pixel, its two toward the foreground, one toward the background), four records instead of
+// LoadAxisRecords' five, merged in the same order so the fit is the same. Empty unless the pixel or its neighbour toward
+// the foreground holds a record of the side, which are loaded first. Used by the spatial filter for the pixels across
+// the axis, whose side is the selected edge's.
+FThinOutlineRecord LoadSilhouetteFitRecordOfSide(uint Axis, int2 Center, bool bBackgroundAlongU)
+{
+	const int2 ForegroundStep = (bBackgroundAlongU ? -1 : 1) * GetAxisStep(Axis);
+	FThinOutlineRecord Pooled = GetEmptyRecord();
+
+	uint OwnType;
+	uint NearType;
+	const FThinOutlineRecord Own = LoadRecord(Axis, Center, OwnType);
+	const FThinOutlineRecord Near = LoadRecord(Axis, Center + ForegroundStep, NearType);
+	BRANCH
+	if (!IsSilhouetteRecordOfSide(Own, OwnType, bBackgroundAlongU) && !IsSilhouetteRecordOfSide(Near, NearType, bBackgroundAlongU))
+	{
+		return Pooled;
+	}
+
+	uint BackType;
+	uint FarType;
+	const FThinOutlineRecord Back = LoadRecord(Axis, Center - ForegroundStep, BackType);
+	const FThinOutlineRecord Far = LoadRecord(Axis, Center + 2 * ForegroundStep, FarType);
+
+	// Distance -1, 0, 1, 2 toward the foreground, as GetSilhouetteFitRecord: the pixel's origin is at -Distance steps
+	// along the axis in the record's coordinates.
+	const float Along = bBackgroundAlongU ? -1.0 : 1.0;
+	if (IsSilhouetteRecordOfSide(Back, BackType, bBackgroundAlongU))
+	{
+		PoolRecord(Pooled, Back, Along);
+	}
+	if (IsSilhouetteRecordOfSide(Own, OwnType, bBackgroundAlongU))
+	{
+		PoolRecord(Pooled, Own, 0.0);
+	}
+	if (IsSilhouetteRecordOfSide(Near, NearType, bBackgroundAlongU))
+	{
+		PoolRecord(Pooled, Near, -Along);
+	}
+	if (IsSilhouetteRecordOfSide(Far, FarType, bBackgroundAlongU))
+	{
+		PoolRecord(Pooled, Far, -2.0 * Along);
 	}
 	return Pooled;
 }
@@ -384,8 +435,8 @@ FThinOutlineSelection SelectEdge(FThinOutlineAxisRecords HorizontalRecords, FThi
 }
 
 // The pooled fit of the selected edge's type at the pixel Across steps away across the axis (the row above or below for
-// the horizontal axis), pooled as that pixel pools it (GetCreaseFitRecord, or GetSilhouetteFitRecord for the selected
-// edge's background side), and the pooled record's co-trigger ratio.
+// the horizontal axis), pooled as that pixel pools it (GetCreaseFitRecord, or GetSilhouetteFitRecord's pool for the
+// selected edge's background side, loaded side-aware), and the pooled record's co-trigger ratio.
 FThinOutlineEdgeFit GetAcrossFit(FThinOutlineSelection Selection, uint Axis, int2 ViewportPos, int Across, out float CoTriggerRatio)
 {
 	const int2 AxisStep = GetAxisStep(Axis);
@@ -395,7 +446,7 @@ FThinOutlineEdgeFit GetAcrossFit(FThinOutlineSelection Selection, uint Axis, int
 	BRANCH
 	if (Selection.bSilhouette)
 	{
-		Pooled = GetSilhouetteFitRecord(LoadAxisRecords(Axis, Center), Selection.Selected.bBackgroundAlongU);
+		Pooled = LoadSilhouetteFitRecordOfSide(Axis, Center, Selection.Selected.bBackgroundAlongU);
 	}
 	else
 	{
