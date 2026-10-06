@@ -44,7 +44,6 @@ extern TAutoConsoleVariable<float> CVarThinOutlineAxisBlendScale;
 // Temporal edge estimator (per-pixel OLS edge records)
 extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorDecay;
 extern TAutoConsoleVariable<int32> CVarThinOutlineEstimatorFadeFrames;
-extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorFadeFactor;
 extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorFadeMaxSpeed;
 extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorSlopeSEThreshold;
 extern TAutoConsoleVariable<int32> CVarThinOutlineEstimatorHistoryReprojection;

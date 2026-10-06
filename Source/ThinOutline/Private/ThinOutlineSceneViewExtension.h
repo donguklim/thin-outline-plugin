@@ -31,7 +31,6 @@ struct FThinOutlineRenderSettings
 	float CreaseThickness = 0.0f;
 	float EstimatorDecay = 1.0f;
 	int32 FadeFrames = 3;
-	float FadeFactor = 0.5f;
 	float FadeMaxSpeed = 0.05f;
 	float SlopeStandardErrorThreshold = 0.0f;
 	float CreaseHistoryDepthThreshold = 0.0f;

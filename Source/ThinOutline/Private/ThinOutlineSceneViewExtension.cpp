@@ -90,7 +90,6 @@ namespace ThinOutline
 		Parameters.RenderPixelsPerDisplayPixel = RenderPixelsPerDisplayPixel;
 		Parameters.CreaseThickness             = Settings.CreaseThickness * MeanRenderPixelsPerDisplayPixel;
 		Parameters.SilhouetteThickness         = Settings.SilhouetteThickness * MeanRenderPixelsPerDisplayPixel;
-		Parameters.FadeLog2Factor              = FMath::Log2(Settings.FadeFactor);
 		Parameters.FadeLimit                   = float(Settings.FadeFrames);
 		Parameters.SlopeStandardErrorThreshold = Settings.SlopeStandardErrorThreshold;
 		Parameters.bSpatialFilter              = Settings.bSpatialFilter ? 1 : 0;
@@ -169,7 +168,6 @@ void FThinOutlineSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& InV
 	Settings.CreaseThickness                     = FMath::Max(0.0f, CVarThinOutlineCreaseThickness.GetValueOnGameThread());
 	Settings.EstimatorDecay                      = FMath::Clamp(CVarThinOutlineEstimatorDecay.GetValueOnGameThread(), 0.001f, 1.0f);
 	Settings.FadeFrames                          = FMath::Max(1, CVarThinOutlineEstimatorFadeFrames.GetValueOnGameThread());
-	Settings.FadeFactor                          = FMath::Clamp(CVarThinOutlineEstimatorFadeFactor.GetValueOnGameThread(), 0.01f, 1.0f);
 	Settings.FadeMaxSpeed                        = FMath::Max(0.0f, CVarThinOutlineEstimatorFadeMaxSpeed.GetValueOnGameThread());
 	Settings.SlopeStandardErrorThreshold         = FMath::Max(0.0f, CVarThinOutlineEstimatorSlopeSEThreshold.GetValueOnGameThread());
 	Settings.CreaseHistoryDepthThreshold         = FMath::Max(0.0f, CVarThinOutlineCreaseHistoryDepthThreshold.GetValueOnGameThread());

@@ -353,8 +353,8 @@ struct FThinOutlineRecord
 	float2 Variance;
 	float Covariance;
 	// Bad frames in a row (ThinOutlineRecord.usf, UpdateAxisRecord): frames on which the record failed a history test or,
-	// for a crease record, met a silhouette sample. The outline is drawn with r.ThinOutline.Estimator.FadeFactor to its
-	// power, and the record is dropped at r.ThinOutline.Estimator.FadeFrames.
+	// for a crease record, met a silhouette sample. The record is kept, at full strength, until
+	// r.ThinOutline.Estimator.FadeFrames.
 	float FadeCount;
 	// Mean edge strength of the samples.
 	float Strength;

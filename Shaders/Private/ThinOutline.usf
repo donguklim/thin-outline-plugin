@@ -8,8 +8,7 @@
 	the records of one edge type, weighted by their sample counts, each shifted into the pixel's coordinates (by -0.5 per
 	pixel to the left/top, +0.5 per pixel to the right/bottom). Around an edge they all describe the same line, so
 	neighbouring pixels pool nearly the same samples, and a pixel whose own history was just reset still gets its
-	neighbours' data. Each record's fade count (bad frames in a row, see ThinOutlineRecord.usf) is pooled with the rest,
-	and the edge is drawn with r.ThinOutline.Estimator.FadeFactor to its power.
+	neighbours' data.
 	Creases: the pixel's own record and its two neighbours'.
 	Silhouettes: the records of a contour are kept by the two foreground pixels next to it (the samples of an edge
 	crossing pixel B go to B on the frames when B samples the foreground, and to its foreground neighbour A on the other
@@ -67,8 +66,6 @@ float2 RenderPixelsPerDisplayPixel;
 // Outline thicknesses, in rendering pixels.
 float CreaseThickness;
 float SilhouetteThickness;
-// Log2 of r.ThinOutline.Estimator.FadeFactor: the strength of an edge is scaled by exp2(fade count * this).
-float FadeLog2Factor;
 // r.ThinOutline.Estimator.FadeFrames (debug view 2).
 float FadeLimit;
 float SlopeStandardErrorThreshold;
@@ -361,7 +358,7 @@ FThinOutlineCandidate GetCandidate(uint EdgeType, FThinOutlineAxisRecords AxisRe
 	}
 
 	Candidate.Fit = FitEdge(Record, DistinctSampleScale);
-	Candidate.Strength = Record.Strength * exp2(Record.FadeCount * FadeLog2Factor);
+	Candidate.Strength = Record.Strength;
 
 	// An axis whose own record is a silhouette record draws no crease. The pixel only draws the part of the outline band
 	// that crosses it.

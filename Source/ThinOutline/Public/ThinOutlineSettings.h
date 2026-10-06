@@ -183,16 +183,12 @@ public:
 	float EstimatorDecay;
 
 	/**
-	 * A record that fails a history test, or a crease record that meets a silhouette sample, is kept and fades instead of being dropped at
-	 * once; after this many such frames in a row it is dropped, or the silhouette takes the axis over. 1 = dropped on the first one. Where a
-	 * pixel's jittered sample misses an edge on one frame of the jitter cycle, the outline then dims on that frame instead of disappearing.
+	 * A record that fails a history test, or a crease record that meets a silhouette sample, is kept (and drawn as before) instead of being
+	 * dropped at once; after this many such frames in a row it is dropped, or the silhouette takes the axis over. 1 = dropped on the first one.
+	 * Where a pixel's jittered sample misses an edge on one frame of the jitter cycle, the outline then stays instead of disappearing.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Estimator", meta = (ConsoleVariable = "r.ThinOutline.Estimator.FadeFrames", ClampMin = "1", UIMax = "8"))
 	int32 FadeFrames;
-
-	/** Strength factor of a record per bad frame in a row: the outline is drawn with this to the power of the count. 1 = full strength until dropped. */
-	UPROPERTY(config, EditAnywhere, Category = "Estimator", meta = (ConsoleVariable = "r.ThinOutline.Estimator.FadeFactor", ClampMin = "0.01", ClampMax = "1.0"))
-	float FadeFactor;
 
 	/**
 	 * When a pixel has both a horizontal- and a vertical-inducer edge, the one with the smaller slope standard error is drawn if the

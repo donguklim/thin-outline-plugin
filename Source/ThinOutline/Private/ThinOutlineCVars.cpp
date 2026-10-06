@@ -268,28 +268,20 @@ TAutoConsoleVariable<int32> CVarThinOutlineEstimatorFadeFrames(
 	TEXT("r.ThinOutline.Estimator.FadeFrames"),
 	3,
 	TEXT("A record that fails a history test (crease depth test; silhouette depth or background test), or a crease record\n")
-	TEXT("that meets a silhouette sample, is kept and fades instead of being dropped at once; after this many such frames\n")
-	TEXT("in a row it is dropped, or the silhouette takes the axis over. 1 = dropped on the first one.\n")
+	TEXT("that meets a silhouette sample, is kept (and drawn as before) instead of being dropped at once; after this many such\n")
+	TEXT("frames in a row it is dropped, or the silhouette takes the axis over. 1 = dropped on the first one.\n")
 	TEXT("Where a pixel's jittered sample misses an edge, or lands on the other surface of a depth step, on one frame of the\n")
-	TEXT("jitter cycle, the outline then dims on that frame instead of disappearing until the record is rebuilt.\n"),
+	TEXT("jitter cycle, the outline then stays instead of disappearing until the record is rebuilt.\n"),
 	ECVF_Default
 );
 
 TAutoConsoleVariable<float> CVarThinOutlineEstimatorFadeMaxSpeed(
 	TEXT("r.ThinOutline.Estimator.FadeMaxSpeed"),
 	0.05f,
-	TEXT("Testing: only a pixel moving slower than this (viewport pixels per frame) fades records (see\n")
+	TEXT("Testing: only a pixel moving slower than this (viewport pixels per frame) keeps records through bad frames (see\n")
 	TEXT("r.ThinOutline.Estimator.FadeFrames); on faster ones a record that fails a history test is dropped at once and a\n")
 	TEXT("silhouette sample takes a crease record over at once, so that records do not trail moving edges and contours that\n")
-	TEXT("move in are not held back. A large value fades at any speed.\n"),
-	ECVF_Default
-);
-
-TAutoConsoleVariable<float> CVarThinOutlineEstimatorFadeFactor(
-	TEXT("r.ThinOutline.Estimator.FadeFactor"),
-	1.0f,
-	TEXT("Strength factor of a record per bad frame in a row (see r.ThinOutline.Estimator.FadeFrames): the outline is drawn\n")
-	TEXT("with this to the power of the count. 1 = kept at full strength until dropped.\n"),
+	TEXT("move in are not held back. A large value keeps them at any speed.\n"),
 	ECVF_Default
 );
 

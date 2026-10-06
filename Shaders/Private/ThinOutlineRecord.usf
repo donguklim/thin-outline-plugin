@@ -30,10 +30,10 @@
 	surface with SURFACE_TURN.
 	Then the axis keeps the record of one type (see UpdateAxisRecord).
 	A record that fails a history test, or a crease record that meets a silhouette sample, is not dropped at once: its fade
-	count (bad frames in a row) goes up, the outline is drawn fainter (r.ThinOutline.Estimator.FadeFactor to the power of
-	the count), and only at r.ThinOutline.Estimator.FadeFrames bad frames in a row is the record dropped or taken over. A
-	pixel whose jittered sample lands on the other surface of a depth step or sliver, or misses an edge, on one frame of
-	the jitter cycle then dims on that frame instead of losing the record and rebuilding it over several frames.
+	count (bad frames in a row) goes up while it is kept and drawn as before, and only at r.ThinOutline.Estimator.FadeFrames
+	bad frames in a row is the record dropped or taken over. A pixel whose jittered sample lands on the other surface of a
+	depth step or sliver, or misses an edge, on one frame of the jitter cycle then keeps its outline instead of losing the
+	record and rebuilding it over several frames.
 =============================================================================*/
 
 #include "ThinOutlineCommon.ush"

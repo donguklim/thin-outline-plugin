@@ -40,7 +40,6 @@ UThinOutlineSettings::UThinOutlineSettings(const FObjectInitializer& ObjectIniti
 	AxisBlendScale = 2.0f;
 	EstimatorDecay = 0.04f;
 	FadeFrames = 3;
-	FadeFactor = 1.0f;
 	SlopeStandardErrorThreshold = 0.05f;
 	HistoryReprojection = 3;
 }
