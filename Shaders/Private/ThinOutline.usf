@@ -34,9 +34,12 @@
 	AfterUpscalerPS: a display pixel adds up, over the rendering pixels it overlaps, the edge strength times the
 	fraction of the display pixel that each one's outline band covers inside the overlap. No jitter is involved, so the
 	coverage is exact, and depth and velocity stay untouched.
+	AfterUpscalerCS (r.ThinOutline.TileClassification): the same, for the display tiles that have records within reach
+	only (one thread group per tile listed by ThinOutlineTileClassify.usf), reading and writing the scene color in place.
 =============================================================================*/
 
 #include "ThinOutlineCommon.ush"
+#include "ThinOutlineTile.ush"
 #include "/Engine/Private/ScreenPass.ush"
 
 SCREEN_PASS_TEXTURE_VIEWPORT(Input)
@@ -84,6 +87,10 @@ float DistinctSampleScale;
 // Sample count of a record that receives a sample every frame (1 / decay rate).
 float SaturatedSampleCount;
 uint DebugView;
+
+// AfterUpscalerCS: the tile list of ThinOutlineTileClassify.usf, and the scene color it reads and writes in place.
+StructuredBuffer<uint> TileList;
+RWTexture2D<float4> RWSceneColor;
 
 #define AXIS_HORIZONTAL 0
 #define AXIS_VERTICAL 1
@@ -601,17 +608,18 @@ float3 GetPixelDebugColor(int2 PixelPos, FThinOutlineAxisRecords HorizontalRecor
 		Blue);
 }
 
-// Drawn with FScreenPassVS (AddDrawScreenPass): the inputs must match its outputs in order, even when unused,
-// otherwise the VS/PS signatures do not link and D3D12 fails to create the pipeline state.
-void MainPS(
-	noperspective float4 UVAndScreenPos : TEXCOORD0,
-	FStereoPSInput StereoInput,
-	float4 SvPosition : SV_POSITION,
-	out float4 OutColor : SV_Target0)
+// Debug view 6: the record types found within a listed tile's reach, as a color (crease records only green, silhouette
+// records only red, both yellow).
+float3 GetTileDebugColor(uint Entry)
 {
-	const uint2 OutputViewportPos = uint2(SvPosition.xy) - Output_ViewportMin;
-	const float4 SceneColor = InputSceneColorTexture.Load(int3(Input_ViewportMin + OutputViewportPos, 0));
-	const int2 ViewportPos = int2(OutputViewportPos);
+	const uint RecordTypes = UnpackTileEntryTypes(Entry);
+	return float3((RecordTypes & THIN_OUTLINE_TILE_SILHOUETTE) != 0 ? 1.0 : 0.0, (RecordTypes & THIN_OUTLINE_TILE_CREASE) != 0 ? 1.0 : 0.0, 0.0);
+}
+
+// MainPS's work for one rendering pixel: the scene color with its outline (or a debug view), and the foreground depth
+// and velocity the pixel hands to ThinOutlineForeground.usf (0 where it keeps its own).
+float4 GetMainColor(int2 ViewportPos, float4 SceneColor, out float ForegroundDeviceZ, out float4 ForegroundVelocity)
+{
 	const int2 PixelPos = int2(View.ViewRectMin.xy) + ViewportPos;
 
 	const FThinOutlineAxisRecords HorizontalRecords = LoadAxisRecords(AXIS_HORIZONTAL, ViewportPos);
@@ -626,8 +634,8 @@ void MainPS(
 	float Alpha = 0.0;
 	float SelectedAlpha = 0.0;
 	float OtherAlpha = 0.0;
-	float ForegroundDeviceZ = 0.0;
-	float4 ForegroundVelocity = 0.0;
+	ForegroundDeviceZ = 0.0;
+	ForegroundVelocity = 0.0;
 
 	if (Selection.bValid)
 	{
@@ -680,37 +688,25 @@ void MainPS(
 		}
 	}
 
-	RWForegroundDeviceZ[ViewportPos] = ForegroundDeviceZ;
-	RWForegroundVelocity[ViewportPos] = ForegroundVelocity;
-
 	BRANCH
 	if (DebugView == 1 || DebugView == 2 || DebugView == 4)
 	{
-		OutColor = float4(GetPixelDebugColor(PixelPos, HorizontalRecords, VerticalRecords), SceneColor.a);
+		return float4(GetPixelDebugColor(PixelPos, HorizontalRecords, VerticalRecords), SceneColor.a);
 	}
-	else if (DebugView == 3)
+	if (DebugView == 3)
 	{
-		OutColor = float4(Selection.bVertical ? OtherAlpha : SelectedAlpha, Selection.bVertical ? SelectedAlpha : OtherAlpha, Selection.bSilhouette ? Alpha : 0.0, SceneColor.a);
+		return float4(Selection.bVertical ? OtherAlpha : SelectedAlpha, Selection.bVertical ? SelectedAlpha : OtherAlpha, Selection.bSilhouette ? Alpha : 0.0, SceneColor.a);
 	}
-	else if (DebugView == 5)
+	if (DebugView == 5)
 	{
-		OutColor = float4(ForegroundDeviceZ > 0.0 ? 1.0 : 0.0, Selection.bSilhouette ? Alpha : 0.0, 0.0, SceneColor.a);
+		return float4(ForegroundDeviceZ > 0.0 ? 1.0 : 0.0, Selection.bSilhouette ? Alpha : 0.0, 0.0, SceneColor.a);
 	}
-	else
-	{
-		OutColor = float4(lerp(SceneColor.rgb, Selection.bSilhouette ? SilhouetteColor : CreaseColor, Alpha), SceneColor.a);
-	}
+	return float4(lerp(SceneColor.rgb, Selection.bSilhouette ? SilhouetteColor : CreaseColor, Alpha), SceneColor.a);
 }
 
-// Overlaps of a display pixel with a rendering pixel thinner than this (in rendering pixels) are rounding of the pixel
-// ratio and are skipped.
-#define THIN_OUTLINE_MIN_OVERLAP 1.0e-3
-
-// r.ThinOutline.DrawAfterUpscaler: drawn at display resolution (the temporal upscaler's output). The edge lines of the
-// records are in the un-jittered coordinates of the rendering pixels, so a display pixel evaluates them directly: each
-// rendering pixel it overlaps draws the part of its selected edge's outline band inside the overlap, as MainPS draws the
-// part inside the display pixel under its sample. Drawn with FScreenPassVS, see MainPS.
-void AfterUpscalerPS(
+// Drawn with FScreenPassVS (AddDrawScreenPass): the inputs must match its outputs in order, even when unused,
+// otherwise the VS/PS signatures do not link and D3D12 fails to create the pipeline state.
+void MainPS(
 	noperspective float4 UVAndScreenPos : TEXCOORD0,
 	FStereoPSInput StereoInput,
 	float4 SvPosition : SV_POSITION,
@@ -718,18 +714,59 @@ void AfterUpscalerPS(
 {
 	const uint2 OutputViewportPos = uint2(SvPosition.xy) - Output_ViewportMin;
 	const float4 SceneColor = InputSceneColorTexture.Load(int3(Input_ViewportMin + OutputViewportPos, 0));
-	const int2 ViewSize = int2(View.ViewSizeAndInvSize.xy);
+	const int2 ViewportPos = int2(OutputViewportPos);
 
-	BRANCH
-	if (DebugView == 1 || DebugView == 2 || DebugView == 4)
+	float ForegroundDeviceZ;
+	float4 ForegroundVelocity;
+	OutColor = GetMainColor(ViewportPos, SceneColor, ForegroundDeviceZ, ForegroundVelocity);
+	RWForegroundDeviceZ[ViewportPos] = ForegroundDeviceZ;
+	RWForegroundVelocity[ViewportPos] = ForegroundVelocity;
+}
+
+// r.ThinOutline.TileClassification: MainPS's work for the rendering tiles that have records within reach only, one
+// thread group per tile listed by ThinOutlineTileClassify.usf, reading and writing the scene color in place. The
+// foreground depth and velocity are written for the listed tiles' pixels only, the only ones the overwrite pass reads.
+// Debug view 6 tints the tiles by the record types found; the other tiles keep their color (for debug views 3 and 5 the
+// scene color is cleared to black first).
+[numthreads(THIN_OUTLINE_TILE_SIZE, THIN_OUTLINE_TILE_SIZE, 1)]
+void CompositeCS(uint GroupId : SV_GroupID, uint2 GroupThreadId : SV_GroupThreadID)
+{
+	const uint Entry = TileList[GroupId];
+	const uint2 OutputViewportPos = UnpackTileEntryCoord(Entry) * THIN_OUTLINE_TILE_SIZE + GroupThreadId;
+	if (any(OutputViewportPos >= uint2(Output_ViewportSize)))
 	{
-		// The rendering pixel under the display pixel's center.
-		const int2 ViewportPos = clamp(int2((float2(OutputViewportPos) + 0.5) * RenderPixelsPerDisplayPixel), 0, ViewSize - 1);
-		const FThinOutlineAxisRecords HorizontalRecords = LoadAxisRecords(AXIS_HORIZONTAL, ViewportPos);
-		const FThinOutlineAxisRecords VerticalRecords = LoadAxisRecords(AXIS_VERTICAL, ViewportPos);
-		OutColor = float4(GetPixelDebugColor(int2(View.ViewRectMin.xy) + ViewportPos, HorizontalRecords, VerticalRecords), SceneColor.a);
 		return;
 	}
+
+	const int2 ViewportPos = int2(OutputViewportPos);
+	const int2 Texel = int2(Output_ViewportMin + OutputViewportPos);
+	const float4 SceneColor = RWSceneColor[Texel];
+
+	BRANCH
+	if (DebugView == 6)
+	{
+		RWForegroundDeviceZ[ViewportPos] = 0.0;
+		RWForegroundVelocity[ViewportPos] = 0.0;
+		RWSceneColor[Texel] = float4(lerp(SceneColor.rgb, GetTileDebugColor(Entry), 0.5), SceneColor.a);
+		return;
+	}
+
+	float ForegroundDeviceZ;
+	float4 ForegroundVelocity;
+	const float4 Color = GetMainColor(ViewportPos, SceneColor, ForegroundDeviceZ, ForegroundVelocity);
+	RWForegroundDeviceZ[ViewportPos] = ForegroundDeviceZ;
+	RWForegroundVelocity[ViewportPos] = ForegroundVelocity;
+	RWSceneColor[Texel] = Color;
+}
+
+// The outline alpha of a display pixel drawn after the upscaler, by the edges of each inducer axis and by the
+// silhouettes among them. The edge lines of the records are in the un-jittered coordinates of the rendering pixels, so
+// a display pixel evaluates them directly: each rendering pixel it overlaps draws the part of its selected edge's
+// outline band inside the overlap, as MainPS draws the part inside the display pixel under its sample. The rendering
+// pixels draw separate parts of the display pixel, so their alphas add up.
+void GetDisplayPixelAlpha(uint2 OutputViewportPos, out float HorizontalAlpha, out float VerticalAlpha, out float SilhouetteAlpha)
+{
+	const int2 ViewSize = int2(View.ViewSizeAndInvSize.xy);
 
 	// The display pixel in rendering pixels from the view's origin (neighbouring display pixels share their borders exactly),
 	// and the rendering pixels it overlaps.
@@ -739,11 +776,9 @@ void AfterUpscalerPS(
 	const int2 FirstPixel = max(int2(floor(DisplayRectMin + THIN_OUTLINE_MIN_OVERLAP)), 0);
 	const int2 LastPixel = min(int2(ceil(DisplayRectMax - THIN_OUTLINE_MIN_OVERLAP)) - 1, ViewSize - 1);
 
-	// Outline alpha drawn by the edges of each inducer axis, and by the silhouettes among them. The rendering pixels draw
-	// separate parts of the display pixel, so their alphas add up.
-	float HorizontalAlpha = 0.0;
-	float VerticalAlpha = 0.0;
-	float SilhouetteAlpha = 0.0;
+	HorizontalAlpha = 0.0;
+	VerticalAlpha = 0.0;
+	SilhouetteAlpha = 0.0;
 
 	LOOP
 	for (int Y = FirstPixel.y; Y <= LastPixel.y; ++Y)
@@ -779,21 +814,82 @@ void AfterUpscalerPS(
 			}
 		}
 	}
+}
 
-	BRANCH
+// The scene color of a display pixel with its outline, or debug view 3 or 5 (any other debug view draws the outline).
+float4 GetAfterUpscalerColor(float4 SceneColor, float HorizontalAlpha, float VerticalAlpha, float SilhouetteAlpha)
+{
 	if (DebugView == 3)
 	{
-		OutColor = float4(HorizontalAlpha, VerticalAlpha, SilhouetteAlpha, SceneColor.a);
+		return float4(HorizontalAlpha, VerticalAlpha, SilhouetteAlpha, SceneColor.a);
 	}
-	else if (DebugView == 5)
+	if (DebugView == 5)
 	{
 		// Nothing is overwritten in this mode.
-		OutColor = float4(0.0, SilhouetteAlpha, 0.0, SceneColor.a);
+		return float4(0.0, SilhouetteAlpha, 0.0, SceneColor.a);
 	}
-	else
+	const float Alpha = saturate(HorizontalAlpha + VerticalAlpha);
+	const float CreaseAlpha = max(HorizontalAlpha + VerticalAlpha - SilhouetteAlpha, 0.0);
+	return float4(SceneColor.rgb * (1.0 - Alpha) + SilhouetteAlpha * SilhouetteColor + CreaseAlpha * CreaseColor, SceneColor.a);
+}
+
+// r.ThinOutline.DrawAfterUpscaler: drawn at display resolution (the temporal upscaler's output), see
+// GetDisplayPixelAlpha. Drawn with FScreenPassVS, see MainPS.
+void AfterUpscalerPS(
+	noperspective float4 UVAndScreenPos : TEXCOORD0,
+	FStereoPSInput StereoInput,
+	float4 SvPosition : SV_POSITION,
+	out float4 OutColor : SV_Target0)
+{
+	const uint2 OutputViewportPos = uint2(SvPosition.xy) - Output_ViewportMin;
+	const float4 SceneColor = InputSceneColorTexture.Load(int3(Input_ViewportMin + OutputViewportPos, 0));
+
+	BRANCH
+	if (DebugView == 1 || DebugView == 2 || DebugView == 4)
 	{
-		const float Alpha = saturate(HorizontalAlpha + VerticalAlpha);
-		const float CreaseAlpha = max(HorizontalAlpha + VerticalAlpha - SilhouetteAlpha, 0.0);
-		OutColor = float4(SceneColor.rgb * (1.0 - Alpha) + SilhouetteAlpha * SilhouetteColor + CreaseAlpha * CreaseColor, SceneColor.a);
+		// The rendering pixel under the display pixel's center.
+		const int2 ViewSize = int2(View.ViewSizeAndInvSize.xy);
+		const int2 ViewportPos = clamp(int2((float2(OutputViewportPos) + 0.5) * RenderPixelsPerDisplayPixel), 0, ViewSize - 1);
+		const FThinOutlineAxisRecords HorizontalRecords = LoadAxisRecords(AXIS_HORIZONTAL, ViewportPos);
+		const FThinOutlineAxisRecords VerticalRecords = LoadAxisRecords(AXIS_VERTICAL, ViewportPos);
+		OutColor = float4(GetPixelDebugColor(int2(View.ViewRectMin.xy) + ViewportPos, HorizontalRecords, VerticalRecords), SceneColor.a);
+		return;
 	}
+
+	float HorizontalAlpha;
+	float VerticalAlpha;
+	float SilhouetteAlpha;
+	GetDisplayPixelAlpha(OutputViewportPos, HorizontalAlpha, VerticalAlpha, SilhouetteAlpha);
+	OutColor = GetAfterUpscalerColor(SceneColor, HorizontalAlpha, VerticalAlpha, SilhouetteAlpha);
+}
+
+// r.ThinOutline.TileClassification: AfterUpscalerPS's work for the display tiles that have records within reach only,
+// one thread group per tile listed by ThinOutlineTileClassify.usf, reading and writing the scene color in place. The
+// other tiles keep their color (for debug views 3 and 5 the scene color is cleared to black first). Debug view 6 tints
+// the tiles by the record types found: crease records only green, silhouette records only red, both yellow.
+[numthreads(THIN_OUTLINE_TILE_SIZE, THIN_OUTLINE_TILE_SIZE, 1)]
+void AfterUpscalerCS(uint GroupId : SV_GroupID, uint2 GroupThreadId : SV_GroupThreadID)
+{
+	const uint Entry = TileList[GroupId];
+	const uint2 OutputViewportPos = UnpackTileEntryCoord(Entry) * THIN_OUTLINE_TILE_SIZE + GroupThreadId;
+	if (any(OutputViewportPos >= uint2(Output_ViewportSize)))
+	{
+		return;
+	}
+
+	const int2 Texel = int2(Output_ViewportMin + OutputViewportPos);
+	const float4 SceneColor = RWSceneColor[Texel];
+
+	BRANCH
+	if (DebugView == 6)
+	{
+		RWSceneColor[Texel] = float4(lerp(SceneColor.rgb, GetTileDebugColor(Entry), 0.5), SceneColor.a);
+		return;
+	}
+
+	float HorizontalAlpha;
+	float VerticalAlpha;
+	float SilhouetteAlpha;
+	GetDisplayPixelAlpha(OutputViewportPos, HorizontalAlpha, VerticalAlpha, SilhouetteAlpha);
+	RWSceneColor[Texel] = GetAfterUpscalerColor(SceneColor, HorizontalAlpha, VerticalAlpha, SilhouetteAlpha);
 }

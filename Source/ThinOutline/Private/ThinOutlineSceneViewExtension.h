@@ -13,6 +13,7 @@ struct FScreenPassTexture;
 struct FThinOutlineRenderSettings
 {
 	bool bDrawAfterUpscaler = false;
+	bool bTileClassification = true;
 	bool bDrawSilhouettes = true;
 	bool bDrawCreases = true;
 	FLinearColor SilhouetteColor = FLinearColor::Black;
@@ -70,6 +71,11 @@ namespace EThinOutlineHistoryTexture
 struct FThinOutlineHistory
 {
 	TRefCountPtr<IPooledRenderTarget> Textures[EThinOutlineHistoryTexture::Num];
+	/**
+	 * r.ThinOutline.TileClassification: where the records are, per 8x8 group at 2x2 blocks (FThinOutlineRecordMaskCS), so
+	 * that the next frame's record pass skips the history fetch where there is none. Null when it was not computed.
+	 */
+	TRefCountPtr<IPooledRenderTarget> RecordMask;
 	FIntPoint ViewSize = FIntPoint::ZeroValue;
 	/** FSceneViewState::GetFrameIndex() of the frame that wrote the records; they only reproject by one frame. */
 	uint32 ViewStateFrameIndex = 0;

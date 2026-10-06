@@ -37,6 +37,17 @@ TAutoConsoleVariable<int32> CVarThinOutlineDrawAfterUpscaler(
 	ECVF_Default
 );
 
+TAutoConsoleVariable<int32> CVarThinOutlineTileClassification(
+	TEXT("r.ThinOutline.TileClassification"),
+	1,
+	TEXT("Run the composite only where there are edges: 0/1. The screen is cut into tiles of 8x8 pixels, sorted by the edge\n")
+	TEXT("records within their reach (none, crease records only, silhouette records only, both), and only the non-empty tiles\n")
+	TEXT("are drawn, by one indirect dispatch in place in the scene color; before the upscaler the depth and velocity overwrite\n")
+	TEXT("draws those tiles only too. 0 draws every pixel as before. Needs a scene color with typed UAV loads, else every pixel\n")
+	TEXT("is drawn. Debug views 1, 2 and 4 always draw every pixel; 6 shows the tiles and the record types found.\n"),
+	ECVF_Default
+);
+
 TAutoConsoleVariable<int32> CVarThinOutlineDebugView(
 	TEXT("r.ThinOutline.DebugView"),
 	0,
@@ -50,6 +61,8 @@ TAutoConsoleVariable<int32> CVarThinOutlineDebugView(
 	TEXT("    from the left (top) check of the axis with more samples: 1 = background on the left (top), 0 = on the right\n")
 	TEXT("    (bottom))\n")
 	TEXT("5 = R = depth and velocity overwritten with the foreground's, G = silhouette outline alpha\n")
+	TEXT("6 = the tiles of r.ThinOutline.TileClassification, tinted by class: crease records only green, silhouette records\n")
+	TEXT("    only red, both yellow; tiles without records keep the scene color (after the upscaler only)\n")
 	TEXT("With r.ThinOutline.DrawAfterUpscaler 1 they are drawn at display resolution: 1, 2 and 4 show the rendering pixel under\n")
 	TEXT("each display pixel (not blurred by the upscaler), 3 and 5 the display pixel's alpha, and 5's R stays 0.\n"),
 	ECVF_Default

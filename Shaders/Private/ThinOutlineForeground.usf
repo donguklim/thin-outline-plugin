@@ -9,12 +9,26 @@
 =============================================================================*/
 
 #include "/Engine/Private/Common.ush"
+#include "ThinOutlineTile.ush"
 
 // Device Z to write, 0 where the pixel keeps its own depth and velocity.
 Texture2D<float> ForegroundDeviceZ;
 // Encoded velocity to write, as read from the velocity texture.
 Texture2D<float4> ForegroundVelocity;
 int2 ViewRectMin;
+
+// r.ThinOutline.TileClassification: MainPS is drawn as one quad per listed tile (ThinOutlineTileClassify.usf) instead of
+// full screen, with the viewport at the view rect. Two triangles of a tile's corners: vertices 0, 1, 2 at (0, 0),
+// (1, 0), (1, 1) and 3, 4, 5 at (0, 0), (1, 1), (0, 1), in tiles.
+StructuredBuffer<uint> TileList;
+
+void TileVS(uint VertexId : SV_VertexID, uint InstanceId : SV_InstanceID, out float4 OutPosition : SV_POSITION)
+{
+	uint2 Corner = UnpackTileEntryCoord(TileList[InstanceId]) * THIN_OUTLINE_TILE_SIZE;
+	Corner.x += (VertexId == 1 || VertexId == 2 || VertexId == 4) ? THIN_OUTLINE_TILE_SIZE : 0;
+	Corner.y += (VertexId == 2 || VertexId == 4 || VertexId == 5) ? THIN_OUTLINE_TILE_SIZE : 0;
+	OutPosition = float4(float2(Corner) * View.ViewSizeAndInvSize.zw * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.5, 1.0);
+}
 
 void MainPS(
 	float4 SvPosition : SV_POSITION,

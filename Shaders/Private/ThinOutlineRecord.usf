@@ -37,6 +37,7 @@
 =============================================================================*/
 
 #include "ThinOutlineCommon.ush"
+#include "ThinOutlineTile.ush"
 
 Texture2D<float4> HistoryHorizontalA;
 Texture2D<float4> HistoryHorizontalB;
@@ -47,6 +48,10 @@ Texture2D<float4> HistoryVerticalB;
 Texture2D<float4> HistorySilhouetteForeground;
 // Linear depth of the pixel's surface.
 Texture2D<float> HistoryDepth;
+// r.ThinOutline.TileClassification: where last frame's records are, per 8x8 group at 2x2 blocks (ThinOutlineTile.ush,
+// RecordMaskCS of ThinOutlineTileClassify.usf), if it was kept with the history (bHistoryMaskValid).
+Texture2D<uint> HistoryRecordMask;
+uint bHistoryMaskValid;
 
 RWTexture2D<float4> RWHorizontalA;
 RWTexture2D<float4> RWHorizontalB;
@@ -143,6 +148,31 @@ FThinOutlineHistoryTaps GetHistoryTaps(float2 ScreenPos, float2 ScreenVelocity)
 		}
 	}
 	return Taps;
+}
+
+// r.ThinOutline.TileClassification: whether any of the taps' 2x2 blocks held a record of either type last frame. When
+// none did, the fetch would only load empty records. Without the mask, assumed.
+bool HasHistoryRecordsNearTaps(FThinOutlineHistoryTaps Taps)
+{
+	if (bHistoryMaskValid == 0)
+	{
+		return true;
+	}
+
+	bool bFound = false;
+	UNROLL
+	for (uint Index = 0; Index < 4; ++Index)
+	{
+		if (Taps.Weights[Index] > 0.0)
+		{
+			const int2 Pixel = Taps.Pixels[Index];
+			const uint Mask = HistoryRecordMask.Load(int3(Pixel / THIN_OUTLINE_TILE_SIZE, 0));
+			const int2 Block = (Pixel % THIN_OUTLINE_TILE_SIZE) / THIN_OUTLINE_MASK_BLOCK_SIZE;
+			const uint Bit = 1u << uint(Block.y * THIN_OUTLINE_MASK_BLOCKS_PER_GROUP + Block.x);
+			bFound = bFound || (Mask & (Bit | (Bit << THIN_OUTLINE_MASK_SILHOUETTE_SHIFT))) != 0;
+		}
+	}
+	return bFound;
 }
 
 // Merges one history record, moved into this pixel's coordinates, into the reprojected record with a weight: its
@@ -465,6 +495,13 @@ void ReprojectHistory(
 	const float3 Velocity = GetPixelVelocity(Foreground.PixelPos, Foreground.DeviceZ);
 	const float2 ScreenPos = ViewportPosToScreenPos(ViewportPos);
 	const FThinOutlineHistoryTaps Taps = GetHistoryTaps(ScreenPos, Velocity.xy);
+
+	// Nothing to fetch where last frame's records are all empty (the outputs stay empty and passed).
+	BRANCH
+	if (!HasHistoryRecordsNearTaps(Taps))
+	{
+		return;
+	}
 
 	// Expected depth of this pixel's surface in the previous frame, for the crease records. A crease lies on a
 	// depth-continuous surface, so a history pixel of the same surface only differs by the depth change across the

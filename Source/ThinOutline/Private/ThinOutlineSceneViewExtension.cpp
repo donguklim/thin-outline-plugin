@@ -5,6 +5,9 @@
 #include "ThinOutlineSettings.h"
 #include "ThinOutlineShaders.h"
 
+#include "CommonRenderResources.h"
+#include "PipelineStateCache.h"
+#include "PixelFormat.h"
 #include "PixelShaderUtils.h"
 #include "PostProcess/PostProcessMaterialInputs.h"
 #include "RenderGraphBlackboard.h"
@@ -44,6 +47,8 @@ namespace ThinOutline
 	{
 		const FSceneView* View = nullptr;
 		FRDGTextureRef Textures[EThinOutlineHistoryTexture::Num] = {};
+		/** r.ThinOutline.TileClassification: the records' positions per 8x8 group, at 2x2 blocks (FThinOutlineRecordMaskCS). */
+		FRDGTextureRef RecordMask = nullptr;
 	};
 
 	/** Render graph blackboard entry: the records the BeforeDOF pass leaves for the MotionBlur after-pass of the same graph. */
@@ -101,6 +106,161 @@ namespace ThinOutline
 		Parameters.DebugView                   = static_cast<uint32>(FMath::Max(Settings.DebugView, 0));
 		return Parameters;
 	}
+
+	/**
+	 * r.ThinOutline.TileClassification: where this frame's records are, per 8x8 group of rendering pixels at 2x2 blocks
+	 * (FThinOutlineRecordMaskCS), so that the composites can find the tiles with records within their reach without
+	 * reading the records themselves.
+	 */
+	FRDGTextureRef AddRecordMaskPass(
+		FRDGBuilder& GraphBuilder,
+		const FViewInfo& ViewInfo,
+		const FRDGTextureRef (&Records)[EThinOutlineHistoryTexture::Num])
+	{
+		using namespace EThinOutlineHistoryTexture;
+
+		const FIntPoint ViewSize = ViewInfo.ViewRect.Size();
+		const FIntPoint GroupCount = FIntPoint::DivideAndRoundUp(ViewSize, FThinOutlineRecordMaskCS::TileSize);
+		const FRDGTextureDesc Desc = FRDGTextureDesc::Create2D(GroupCount, PF_R32_UINT, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_UAV);
+		FRDGTextureRef RecordMask = GraphBuilder.CreateTexture(Desc, TEXT("ThinOutline.RecordMask"));
+
+		FThinOutlineRecordMaskCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FThinOutlineRecordMaskCS::FParameters>();
+		PassParameters->View         = ViewInfo.ViewUniformBuffer;
+		PassParameters->HorizontalA  = Records[HorizontalA];
+		PassParameters->VerticalA    = Records[VerticalA];
+		PassParameters->RWRecordMask = GraphBuilder.CreateUAV(RecordMask);
+
+		TShaderMapRef<FThinOutlineRecordMaskCS> ComputeShader(GetGlobalShaderMap(ViewInfo.GetFeatureLevel()));
+		FComputeShaderUtils::AddPass(
+			GraphBuilder,
+			RDG_EVENT_NAME("ThinOutline.RecordMask %dx%d", GroupCount.X, GroupCount.Y),
+			ComputeShader,
+			PassParameters,
+			FIntVector(GroupCount.X, GroupCount.Y, 1));
+		return RecordMask;
+	}
+
+	/** The tiles of a composite pass that have records within reach, and the indirect arguments of its dispatch and of the overwrite draw. */
+	struct FTileLists
+	{
+		FRDGBufferRef TileList = nullptr;
+		FRDGBufferRef DispatchArgs = nullptr;
+		FRDGBufferRef DrawArgs = nullptr;
+	};
+
+	/**
+	 * r.ThinOutline.TileClassification: lists the tiles of TargetSize (display pixels after the upscaler, rendering pixels
+	 * before it) that have records within reach, from the record mask (FThinOutlineTileClassifyCS), and turns their
+	 * count into indirect arguments (FThinOutlineTileSetupCS), so nothing is read back to the CPU.
+	 */
+	FTileLists AddTileListPasses(FRDGBuilder& GraphBuilder, const FViewInfo& ViewInfo, FRDGTextureRef RecordMask, FIntPoint TargetSize)
+	{
+		const FIntPoint ViewSize = ViewInfo.ViewRect.Size();
+		const FIntPoint TileCount = FIntPoint::DivideAndRoundUp(TargetSize, FThinOutlineRecordMaskCS::TileSize);
+		const FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(ViewInfo.GetFeatureLevel());
+
+		FTileLists Lists;
+		FRDGBufferRef TileCounter = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 1), TEXT("ThinOutline.TileCounter"));
+		Lists.TileList = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), TileCount.X * TileCount.Y), TEXT("ThinOutline.TileList"));
+		Lists.DispatchArgs = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateIndirectDesc<FRHIDispatchIndirectParameters>(1), TEXT("ThinOutline.TileIndirectArgs"));
+		Lists.DrawArgs = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateIndirectDesc<FRHIDrawIndirectParameters>(1), TEXT("ThinOutline.TileDrawIndirectArgs"));
+		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(TileCounter), 0u);
+
+		{
+			FThinOutlineTileClassifyCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FThinOutlineTileClassifyCS::FParameters>();
+			PassParameters->View                        = ViewInfo.ViewUniformBuffer;
+			PassParameters->RecordMask                  = RecordMask;
+			PassParameters->TileCount                   = FUintVector2(uint32(TileCount.X), uint32(TileCount.Y));
+			PassParameters->RenderPixelsPerDisplayPixel = FVector2f(
+				float(ViewSize.X) / float(FMath::Max(TargetSize.X, 1)),
+				float(ViewSize.Y) / float(FMath::Max(TargetSize.Y, 1)));
+			PassParameters->RWTileCounter               = GraphBuilder.CreateUAV(TileCounter);
+			PassParameters->RWTileList                  = GraphBuilder.CreateUAV(Lists.TileList);
+
+			TShaderMapRef<FThinOutlineTileClassifyCS> ComputeShader(ShaderMap);
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("ThinOutline.TileClassify %dx%d", TileCount.X, TileCount.Y),
+				ComputeShader,
+				PassParameters,
+				FComputeShaderUtils::GetGroupCount(TileCount, FThinOutlineTileClassifyCS::ThreadGroupSize));
+		}
+
+		{
+			FThinOutlineTileSetupCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FThinOutlineTileSetupCS::FParameters>();
+			PassParameters->TileCounter            = GraphBuilder.CreateSRV(TileCounter);
+			PassParameters->RWTileIndirectArgs     = GraphBuilder.CreateUAV(Lists.DispatchArgs, PF_R32_UINT);
+			PassParameters->RWTileDrawIndirectArgs = GraphBuilder.CreateUAV(Lists.DrawArgs, PF_R32_UINT);
+
+			TShaderMapRef<FThinOutlineTileSetupCS> ComputeShader(ShaderMap);
+			FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("ThinOutline.TileSetup"), ComputeShader, PassParameters, FIntVector(1, 1, 1));
+		}
+		return Lists;
+	}
+
+	/**
+	 * Whether a composite can run on tiles, in place in the scene color through a UAV: a UAV-capable scene color whose
+	 * format supports typed UAV loads, no override output, and a view drawn per tile (debug views 1, 2 and 4 show every
+	 * pixel).
+	 */
+	bool CanCompositeTiles(const FThinOutlineRenderSettings& Settings, const FPostProcessMaterialInputs& Inputs, const FScreenPassTexture& SceneColor)
+	{
+		const bool bPerPixelDebugView = Settings.DebugView == 1 || Settings.DebugView == 2 || Settings.DebugView == 4;
+		return Settings.bTileClassification
+			&& !bPerPixelDebugView
+			&& !Inputs.OverrideOutput.IsValid()
+			&& EnumHasAnyFlags(SceneColor.Texture->Desc.Flags, TexCreate_UAV)
+			&& UE::PixelFormat::HasCapabilities(SceneColor.Texture->Desc.Format, EPixelFormatCapabilities::TypedUAVLoad);
+	}
+
+	/** Debug views 3 and 5 show the outline alpha on black: the tiles write theirs, the rest stays cleared. */
+	FRDGTextureUAVRef CreateTileSceneColorUAV(FRDGBuilder& GraphBuilder, const FThinOutlineRenderSettings& Settings, const FScreenPassTexture& SceneColor)
+	{
+		FRDGTextureUAVRef SceneColorUAV = GraphBuilder.CreateUAV(SceneColor.Texture);
+		if (Settings.DebugView == 3 || Settings.DebugView == 5)
+		{
+			AddClearUAVPass(GraphBuilder, SceneColorUAV, FLinearColor::Black);
+		}
+		return SceneColorUAV;
+	}
+
+	/**
+	 * r.ThinOutline.TileClassification: the composite after the upscaler on the display tiles that have records within
+	 * reach only, one indirect dispatch drawing them in place in the scene color (FThinOutlineAfterUpscalerCS).
+	 */
+	void AddAfterUpscalerTilePasses(
+		FRDGBuilder& GraphBuilder,
+		const FViewInfo& ViewInfo,
+		const FPostProcessMaterialInputs& Inputs,
+		const FThinOutlineRenderSettings& Settings,
+		const FViewRecords& ViewRecords,
+		const FScreenPassTexture& SceneColor)
+	{
+		const FIntPoint DisplaySize = SceneColor.ViewRect.Size();
+		const FTileLists Lists = AddTileListPasses(GraphBuilder, ViewInfo, ViewRecords.RecordMask, DisplaySize);
+		const FScreenPassTextureViewportParameters ViewportParameters = GetScreenPassTextureViewportParameters(FScreenPassTextureViewport(SceneColor));
+
+		FThinOutlineAfterUpscalerCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FThinOutlineAfterUpscalerCS::FParameters>();
+		PassParameters->View                = ViewInfo.ViewUniformBuffer;
+		PassParameters->SceneTexturesStruct = Inputs.SceneTextures.SceneTextures;
+		PassParameters->Substrate           = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
+		PassParameters->EdgeCheck           = GetEdgeCheckParameters(Settings);
+		PassParameters->Composite           = GetCompositeParameters(Settings, ViewInfo, ViewRecords.Textures, DisplaySize);
+		PassParameters->Input               = ViewportParameters;
+		PassParameters->Output              = ViewportParameters;
+		PassParameters->TileList            = GraphBuilder.CreateSRV(Lists.TileList);
+		PassParameters->RWSceneColor        = CreateTileSceneColorUAV(GraphBuilder, Settings, SceneColor);
+		PassParameters->TileIndirectArgs    = Lists.DispatchArgs;
+
+		TShaderMapRef<FThinOutlineAfterUpscalerCS> ComputeShader(GetGlobalShaderMap(ViewInfo.GetFeatureLevel()));
+		FComputeShaderUtils::AddPass(
+			GraphBuilder,
+			RDG_EVENT_NAME("ThinOutline.CompositeAfterUpscaler(Tiles)"),
+			ComputeShader,
+			PassParameters,
+			Lists.DispatchArgs,
+			0);
+	}
 }
 
 RDG_REGISTER_BLACKBOARD_STRUCT(ThinOutline::FFrameRecords);
@@ -150,6 +310,7 @@ void FThinOutlineSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& InV
 {
 	FThinOutlineRenderSettings Settings;
 	Settings.bDrawAfterUpscaler                  = CVarThinOutlineDrawAfterUpscaler.GetValueOnGameThread() != 0;
+	Settings.bTileClassification                 = CVarThinOutlineTileClassification.GetValueOnGameThread() != 0;
 	Settings.bDrawSilhouettes                    = CVarThinOutlineSilhouette.GetValueOnGameThread() != 0;
 	Settings.bDrawCreases                        = CVarThinOutlineCrease.GetValueOnGameThread() != 0;
 	Settings.SilhouetteColor                     = GetDefault<UThinOutlineSettings>()->SilhouetteColor;
@@ -289,6 +450,10 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 
 	using namespace EThinOutlineHistoryTexture;
 
+	// r.ThinOutline.TileClassification: last frame's record mask, so the record pass skips the history fetch where
+	// there is nothing to fetch. Only with a valid history (the mask was extracted with the records).
+	const bool bHistoryMaskValid = bHistoryValid && History->RecordMask.IsValid();
+
 	// Edge record update.
 	FRDGTextureRef Records[Num];
 	FRDGTextureRef HistoryRecords[Num];
@@ -312,6 +477,8 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->HistoryVerticalB                    = HistoryRecords[VerticalB];
 		PassParameters->HistorySilhouetteForeground         = HistoryRecords[SilhouetteForeground];
 		PassParameters->HistoryDepth                        = HistoryRecords[Depth];
+		PassParameters->HistoryRecordMask                   = bHistoryMaskValid ? GraphBuilder.RegisterExternalTexture(History->RecordMask) : GSystemTextures.GetZeroUIntDummy(GraphBuilder);
+		PassParameters->bHistoryMaskValid                   = bHistoryMaskValid ? 1 : 0;
 		PassParameters->RWHorizontalA                       = GraphBuilder.CreateUAV(Records[HorizontalA]);
 		PassParameters->RWHorizontalB                       = GraphBuilder.CreateUAV(Records[HorizontalB]);
 		PassParameters->RWVerticalA                         = GraphBuilder.CreateUAV(Records[VerticalA]);
@@ -350,12 +517,24 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 			FComputeShaderUtils::GetGroupCount(ViewSize, FThinOutlineRecordCS::ThreadGroupSize));
 	}
 
+	// r.ThinOutline.TileClassification: where this frame's records are, for the composites' tile lists and for the next
+	// frame's history fetch.
+	FRDGTextureRef RecordMask = Settings.bTileClassification ? ThinOutline::AddRecordMaskPass(GraphBuilder, ViewInfo, Records) : nullptr;
+
 	// Views that must not advance the view state's temporal history only read it.
 	if (History && !ViewInfo.bStatePrevViewInfoIsReadOnly)
 	{
 		for (int32 Index = 0; Index < Num; ++Index)
 		{
 			GraphBuilder.QueueTextureExtraction(Records[Index], &History->Textures[Index]);
+		}
+		if (RecordMask)
+		{
+			GraphBuilder.QueueTextureExtraction(RecordMask, &History->RecordMask);
+		}
+		else
+		{
+			History->RecordMask = nullptr;
 		}
 		History->ViewSize = ViewSize;
 		History->ViewStateFrameIndex = ViewStateFrameIndex;
@@ -369,18 +548,9 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		{
 			ViewRecords.Textures[Index] = Records[Index];
 		}
+		ViewRecords.RecordMask = RecordMask;
 		return Inputs.ReturnUntouchedSceneColorForPostProcessing(GraphBuilder);
 	}
-
-	// Edge reconstruction and composite.
-	FScreenPassRenderTarget Output = Inputs.OverrideOutput;
-	if (!Output.IsValid())
-	{
-		Output = FScreenPassRenderTarget::CreateFromInput(GraphBuilder, SceneColor, View.GetOverwriteLoadAction(), TEXT("ThinOutline.SceneColor"));
-	}
-
-	const FScreenPassTextureViewport InputViewport(SceneColor);
-	const FScreenPassTextureViewport OutputViewport(Output);
 
 	// Display pixels are the output pixels of the temporal upscaler; without one, temporal AA runs at rendering resolution.
 	const FIntPoint DisplaySize = View.PrimaryScreenPercentageMethod == EPrimaryScreenPercentageMethod::TemporalUpscale
@@ -393,7 +563,54 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 	FRDGTextureRef ForegroundDeviceZ = GraphBuilder.CreateTexture(ForegroundDeviceZDesc, TEXT("ThinOutline.ForegroundDeviceZ"));
 	FRDGTextureRef ForegroundVelocity = GraphBuilder.CreateTexture(ForegroundVelocityDesc, TEXT("ThinOutline.ForegroundVelocity"));
 
+	// Edge reconstruction and composite. With r.ThinOutline.TileClassification, only on the rendering tiles that have
+	// records within reach, in place in the scene color; the overwrite then draws those tiles only (every pixel of a
+	// listed tile gets its foreground values, the other tiles are never read).
+	const bool bTileClassification = RecordMask && ThinOutline::CanCompositeTiles(Settings, Inputs, SceneColor);
+	FScreenPassTexture Output;
+	ThinOutline::FTileLists TileLists;
+
+	if (bTileClassification)
 	{
+		TileLists = ThinOutline::AddTileListPasses(GraphBuilder, ViewInfo, RecordMask, ViewSize);
+		const FScreenPassTextureViewportParameters ViewportParameters = GetScreenPassTextureViewportParameters(FScreenPassTextureViewport(SceneColor));
+
+		FThinOutlineCompositeCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FThinOutlineCompositeCS::FParameters>();
+		PassParameters->View                 = View.ViewUniformBuffer;
+		PassParameters->SceneTexturesStruct  = Inputs.SceneTextures.SceneTextures;
+		PassParameters->Substrate            = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
+		PassParameters->EdgeCheck            = EdgeCheck;
+		PassParameters->Composite            = ThinOutline::GetCompositeParameters(Settings, ViewInfo, Records, DisplaySize);
+		PassParameters->Input                = ViewportParameters;
+		PassParameters->Output               = ViewportParameters;
+		PassParameters->RWForegroundDeviceZ  = GraphBuilder.CreateUAV(ForegroundDeviceZ);
+		PassParameters->RWForegroundVelocity = GraphBuilder.CreateUAV(ForegroundVelocity);
+		PassParameters->SampleLocalPosition  = SampleLocalPosition;
+		PassParameters->TileList             = GraphBuilder.CreateSRV(TileLists.TileList);
+		PassParameters->RWSceneColor         = ThinOutline::CreateTileSceneColorUAV(GraphBuilder, Settings, SceneColor);
+		PassParameters->TileIndirectArgs     = TileLists.DispatchArgs;
+
+		TShaderMapRef<FThinOutlineCompositeCS> ComputeShader(GetGlobalShaderMap(View.GetFeatureLevel()));
+		FComputeShaderUtils::AddPass(
+			GraphBuilder,
+			RDG_EVENT_NAME("ThinOutline.Composite(Tiles)"),
+			ComputeShader,
+			PassParameters,
+			TileLists.DispatchArgs,
+			0);
+		Output = SceneColor;
+	}
+	else
+	{
+		FScreenPassRenderTarget OutputTarget = Inputs.OverrideOutput;
+		if (!OutputTarget.IsValid())
+		{
+			OutputTarget = FScreenPassRenderTarget::CreateFromInput(GraphBuilder, SceneColor, View.GetOverwriteLoadAction(), TEXT("ThinOutline.SceneColor"));
+		}
+
+		const FScreenPassTextureViewport InputViewport(SceneColor);
+		const FScreenPassTextureViewport OutputViewport(OutputTarget);
+
 		FThinOutlinePS::FParameters* PassParameters = GraphBuilder.AllocParameters<FThinOutlinePS::FParameters>();
 		PassParameters->View                        = View.ViewUniformBuffer;
 		PassParameters->SceneTexturesStruct         = Inputs.SceneTextures.SceneTextures;
@@ -406,7 +623,7 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->RWForegroundDeviceZ         = GraphBuilder.CreateUAV(ForegroundDeviceZ);
 		PassParameters->RWForegroundVelocity        = GraphBuilder.CreateUAV(ForegroundVelocity);
 		PassParameters->SampleLocalPosition         = SampleLocalPosition;
-		PassParameters->RenderTargets[0]            = Output.GetRenderTargetBinding();
+		PassParameters->RenderTargets[0]            = OutputTarget.GetRenderTargetBinding();
 
 		TShaderMapRef<FThinOutlinePS> PixelShader(GetGlobalShaderMap(View.GetFeatureLevel()));
 
@@ -418,6 +635,7 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 			InputViewport,
 			PixelShader,
 			PassParameters);
+		Output = OutputTarget;
 	}
 
 	// The pixels painted with a silhouette take their foreground's depth and velocity, in the textures the temporal
@@ -453,19 +671,57 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 			PassParameters->RenderTargets[0] = FRenderTargetBinding(SceneVelocityTexture, ERenderTargetLoadAction::ELoad);
 		}
 
-		FPixelShaderUtils::AddFullscreenPass(
-			GraphBuilder,
-			GetGlobalShaderMap(View.GetFeatureLevel()),
-			RDG_EVENT_NAME("ThinOutline.ForegroundDepthVelocity"),
-			PixelShader,
-			PassParameters,
-			ViewInfo.ViewRect,
-			nullptr,
-			nullptr,
-			TStaticDepthStencilState<true, CF_Always>::GetRHI());
+		if (bTileClassification)
+		{
+			// One quad per listed tile, placed by FThinOutlineTileVS, with the pixel shader and its states as the full-screen
+			// pass below. Writing SV_Depth costs every fragment drawn, so the 86% or so of empty tiles are not drawn at all.
+			PassParameters->VS.View             = View.ViewUniformBuffer;
+			PassParameters->VS.TileList         = GraphBuilder.CreateSRV(TileLists.TileList);
+			PassParameters->TileDrawIndirectArgs = TileLists.DrawArgs;
+
+			TShaderMapRef<FThinOutlineTileVS> VertexShader(GetGlobalShaderMap(View.GetFeatureLevel()));
+			const FIntRect ViewRect = ViewInfo.ViewRect;
+			FRDGBufferRef DrawArgs = TileLists.DrawArgs;
+			GraphBuilder.AddPass(
+				RDG_EVENT_NAME("ThinOutline.ForegroundDepthVelocity(Tiles)"),
+				PassParameters,
+				ERDGPassFlags::Raster,
+				[PassParameters, VertexShader, PixelShader, ViewRect, DrawArgs](FRDGAsyncTask, FRHICommandList& RHICmdList)
+				{
+					FGraphicsPipelineStateInitializer GraphicsPSOInit;
+					RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
+					GraphicsPSOInit.BlendState = TStaticBlendState<>::GetRHI();
+					GraphicsPSOInit.RasterizerState = TStaticRasterizerState<>::GetRHI();
+					GraphicsPSOInit.DepthStencilState = TStaticDepthStencilState<true, CF_Always>::GetRHI();
+					GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GFilterVertexDeclaration.VertexDeclarationRHI;
+					GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
+					GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
+					GraphicsPSOInit.PrimitiveType = PT_TriangleList;
+					SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
+					SetShaderParameters(RHICmdList, VertexShader, VertexShader.GetVertexShader(), PassParameters->VS);
+					SetShaderParameters(RHICmdList, PixelShader, PixelShader.GetPixelShader(), *PassParameters);
+					RHICmdList.SetViewport(ViewRect.Min.X, ViewRect.Min.Y, 0.0f, ViewRect.Max.X, ViewRect.Max.Y, 1.0f);
+					RHICmdList.SetStreamSource(0, nullptr, 0);
+					DrawArgs->MarkResourceAsUsed();
+					RHICmdList.DrawPrimitiveIndirect(DrawArgs->GetIndirectRHICallBuffer(), 0);
+				});
+		}
+		else
+		{
+			FPixelShaderUtils::AddFullscreenPass(
+				GraphBuilder,
+				GetGlobalShaderMap(View.GetFeatureLevel()),
+				RDG_EVENT_NAME("ThinOutline.ForegroundDepthVelocity"),
+				PixelShader,
+				PassParameters,
+				ViewInfo.ViewRect,
+				nullptr,
+				nullptr,
+				TStaticDepthStencilState<true, CF_Always>::GetRHI());
+		}
 	}
 
-	return MoveTemp(Output);
+	return Output;
 }
 
 FScreenPassTexture FThinOutlineSceneViewExtension::AddAfterUpscalerPass_RenderThread(
@@ -490,6 +746,15 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddAfterUpscalerPass_RenderTh
 	const FIntPoint DisplaySize = SceneColor.ViewRect.Size();
 
 	RDG_EVENT_SCOPE_STAT(GraphBuilder, ThinOutline, "ThinOutline.AfterUpscaler %dx%d", DisplaySize.X, DisplaySize.Y);
+
+	// r.ThinOutline.TileClassification: only the display tiles with records within reach are drawn, in place in the scene
+	// color through a UAV (the upscaler's output has no render target flag, so the tiles cannot be drawn with blending
+	// either).
+	if (ViewRecords->RecordMask && ThinOutline::CanCompositeTiles(Settings, Inputs, SceneColor))
+	{
+		ThinOutline::AddAfterUpscalerTilePasses(GraphBuilder, ViewInfo, Inputs, Settings, *ViewRecords, SceneColor);
+		return SceneColor;
+	}
 
 	FScreenPassRenderTarget Output = Inputs.OverrideOutput;
 	if (!Output.IsValid())

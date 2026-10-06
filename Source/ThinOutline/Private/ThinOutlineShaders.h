@@ -52,6 +52,7 @@ public:
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, HistoryVerticalB)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, HistorySilhouetteForeground)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, HistoryDepth)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, HistoryRecordMask)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWHorizontalA)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWHorizontalB)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWVerticalA)
@@ -70,6 +71,7 @@ public:
 		SHADER_PARAMETER(float, CreaseHistoryKeepValleyThreshold)
 		SHADER_PARAMETER(float, CreaseHistoryMissLimit)
 		SHADER_PARAMETER(uint32, bHistoryValid)
+		SHADER_PARAMETER(uint32, bHistoryMaskValid)
 		SHADER_PARAMETER(uint32, HistoryReprojectionMode)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -145,6 +147,36 @@ public:
 	}
 };
 
+// r.ThinOutline.TileClassification: FThinOutlinePS's composite for the listed rendering tiles only, one thread group per
+// tile, reading and writing the scene color in place.
+class FThinOutlineCompositeCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FThinOutlineCompositeCS);
+	SHADER_USE_PARAMETER_STRUCT(FThinOutlineCompositeCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSceneTextureUniformParameters, SceneTexturesStruct)
+		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSubstrateGlobalUniformParameters, Substrate)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineEdgeCheckParameters, EdgeCheck)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineCompositeParameters, Composite)
+		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Input)
+		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Output)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, RWForegroundDeviceZ)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWForegroundVelocity)
+		SHADER_PARAMETER(FVector2f, SampleLocalPosition)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TileList)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWSceneColor)
+		RDG_BUFFER_ACCESS(TileIndirectArgs, ERHIAccess::IndirectArgs)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
 // r.ThinOutline.DrawAfterUpscaler: composites the outline reconstructed from the edge records into scene color at display
 // resolution, after the temporal upscaler.
 class FThinOutlineAfterUpscalerPS : public FGlobalShader
@@ -171,7 +203,124 @@ public:
 	}
 };
 
-// Copies the foreground depth and velocity picked by FThinOutlinePS into the scene depth and velocity textures.
+// r.ThinOutline.TileClassification: for every 8x8 group of rendering pixels, which 2x2 blocks hold a crease or a
+// silhouette record (ThinOutlineTileClassify.usf, RecordMaskCS).
+class FThinOutlineRecordMaskCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FThinOutlineRecordMaskCS);
+	SHADER_USE_PARAMETER_STRUCT(FThinOutlineRecordMaskCS, FGlobalShader);
+
+	// THIN_OUTLINE_TILE_SIZE of ThinOutlineTile.ush: the mask's groups, and the composites' tiles, are 8x8 pixels.
+	static constexpr int32 TileSize = 8;
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, HorizontalA)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, VerticalA)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, RWRecordMask)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+// r.ThinOutline.TileClassification: appends every tile of a composite pass that has edge records within its reach to
+// the tile list, with the record types found (ThinOutlineTileClassify.usf, TileClassifyCS).
+class FThinOutlineTileClassifyCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FThinOutlineTileClassifyCS);
+	SHADER_USE_PARAMETER_STRUCT(FThinOutlineTileClassifyCS, FGlobalShader);
+
+	// One thread per tile, in groups of this many tiles along each axis.
+	static constexpr int32 ThreadGroupSize = 8;
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, RecordMask)
+		SHADER_PARAMETER(FUintVector2, TileCount)
+		SHADER_PARAMETER(FVector2f, RenderPixelsPerDisplayPixel)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWTileCounter)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWTileList)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+// Turns the tile counter into the arguments of the indirect dispatch over the listed tiles (the composites) and of the
+// indirect draw of one quad per tile (the overwrite pass).
+class FThinOutlineTileSetupCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FThinOutlineTileSetupCS);
+	SHADER_USE_PARAMETER_STRUCT(FThinOutlineTileSetupCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TileCounter)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWTileIndirectArgs)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWTileDrawIndirectArgs)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+// r.ThinOutline.TileClassification: FThinOutlineAfterUpscalerPS's composite for the listed display tiles only, one
+// thread group per tile, reading and writing the scene color in place.
+class FThinOutlineAfterUpscalerCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FThinOutlineAfterUpscalerCS);
+	SHADER_USE_PARAMETER_STRUCT(FThinOutlineAfterUpscalerCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSceneTextureUniformParameters, SceneTexturesStruct)
+		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSubstrateGlobalUniformParameters, Substrate)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineEdgeCheckParameters, EdgeCheck)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineCompositeParameters, Composite)
+		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Input)
+		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Output)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TileList)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWSceneColor)
+		RDG_BUFFER_ACCESS(TileIndirectArgs, ERHIAccess::IndirectArgs)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+// r.ThinOutline.TileClassification: places one quad per listed tile, in the view rect, for the overwrite pass drawn on
+// the tiles only (ThinOutlineForeground.usf, TileVS).
+class FThinOutlineTileVS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FThinOutlineTileVS);
+	SHADER_USE_PARAMETER_STRUCT(FThinOutlineTileVS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TileList)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+// Copies the foreground depth and velocity picked by FThinOutlinePS into the scene depth and velocity textures. Drawn
+// full screen, or (r.ThinOutline.TileClassification) as one quad per listed tile with FThinOutlineTileVS.
 class FThinOutlineForegroundPS : public FGlobalShader
 {
 public:
@@ -185,6 +334,8 @@ public:
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, ForegroundDeviceZ)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, ForegroundVelocity)
 		SHADER_PARAMETER(FIntPoint, ViewRectMin)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineTileVS::FParameters, VS)
+		RDG_BUFFER_ACCESS(TileDrawIndirectArgs, ERHIAccess::IndirectArgs)
 		RENDER_TARGET_BINDING_SLOTS()
 	END_SHADER_PARAMETER_STRUCT()
 

@@ -1,0 +1,47 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+/*=============================================================================
+	ThinOutlineTile.ush: constants of the composite passes shared with the tile classification
+	(ThinOutlineTileClassify.usf). Kept apart from ThinOutlineCommon.ush, which the classification does not need.
+=============================================================================*/
+
+#pragma once
+
+// Overlaps of a display pixel with a rendering pixel thinner than this (in rendering pixels) are rounding of the pixel
+// ratio and are skipped.
+#define THIN_OUTLINE_MIN_OVERLAP 1.0e-3
+
+// r.ThinOutline.TileClassification: the composite runs only on the tiles that have edge records within reach. Tiles are
+// squares of this many target pixels (display pixels after the upscaler); the reach is this many rendering pixels
+// around the rendering rectangle a tile overlaps: a pixel reads the records of itself and two pixels on each side along
+// an axis, and the spatial filter those of the rows across.
+#define THIN_OUTLINE_TILE_SIZE 8
+#define THIN_OUTLINE_TILE_MARGIN 2
+
+// The record mask (RecordMaskCS): one uint per 8x8 group of rendering pixels, in which bit (row / 2) * 4 + column / 2
+// says that the 2x2 block holds a crease record, and the same bit shifted by 16 a silhouette record.
+#define THIN_OUTLINE_MASK_BLOCK_SIZE 2
+#define THIN_OUTLINE_MASK_BLOCKS_PER_GROUP 4
+#define THIN_OUTLINE_MASK_SILHOUETTE_SHIFT 16
+
+// Record types found within a tile's reach, and the tile list entries: tile x, tile y and the record types.
+#define THIN_OUTLINE_TILE_CREASE 1u
+#define THIN_OUTLINE_TILE_SILHOUETTE 2u
+#define THIN_OUTLINE_TILE_ENTRY_COORD_BITS 14
+#define THIN_OUTLINE_TILE_ENTRY_COORD_MASK 0x3FFFu
+#define THIN_OUTLINE_TILE_ENTRY_TYPE_SHIFT 28
+
+uint PackTileEntry(uint2 Tile, uint RecordTypes)
+{
+	return Tile.x | (Tile.y << THIN_OUTLINE_TILE_ENTRY_COORD_BITS) | (RecordTypes << THIN_OUTLINE_TILE_ENTRY_TYPE_SHIFT);
+}
+
+uint2 UnpackTileEntryCoord(uint Entry)
+{
+	return uint2(Entry & THIN_OUTLINE_TILE_ENTRY_COORD_MASK, (Entry >> THIN_OUTLINE_TILE_ENTRY_COORD_BITS) & THIN_OUTLINE_TILE_ENTRY_COORD_MASK);
+}
+
+uint UnpackTileEntryTypes(uint Entry)
+{
+	return Entry >> THIN_OUTLINE_TILE_ENTRY_TYPE_SHIFT;
+}

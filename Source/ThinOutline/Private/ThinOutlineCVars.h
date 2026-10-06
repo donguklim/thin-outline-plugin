@@ -13,6 +13,9 @@ extern TAutoConsoleVariable<int32> CVarThinOutlineCrease;
 // 0 = draw before the temporal upscaler at rendering resolution, 1 = after it at display resolution
 extern TAutoConsoleVariable<int32> CVarThinOutlineDrawAfterUpscaler;
 
+// 1 = the composite runs only on the tiles that have edge records within reach
+extern TAutoConsoleVariable<int32> CVarThinOutlineTileClassification;
+
 // 0 = composite the outline into scene color, 1..5 = debug views (see the CVar help)
 extern TAutoConsoleVariable<int32> CVarThinOutlineDebugView;
 

@@ -1,0 +1,189 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+/*=============================================================================
+	ThinOutlineTileClassify.usf: finds the tiles of a composite pass that can read an edge record, so that the composite
+	runs only on those (r.ThinOutline.TileClassification).
+
+	A composite pixel reads records up to THIN_OUTLINE_TILE_MARGIN rendering pixels away along the axes (the pixel and
+	two on each side, and the spatial filter the row across). So a tile of THIN_OUTLINE_TILE_SIZE^2 target pixels
+	(display pixels after the upscaler, rendering pixels before it) counts when a record lies inside the rendering
+	rectangle it overlaps, grown by the margin. Two passes:
+	- RecordMaskCS, one thread per rendering pixel: for every 8x8 group of rendering pixels, which of its 2x2 blocks hold
+	  a crease record and which a silhouette record, as one uint (ThinOutlineTile.ush). Every record is read once.
+	- TileClassifyCS, one thread per tile: reads the mask of the groups its rectangle touches (at most 3x3 of them), and
+	  appends the tile, with the record types found, to the tile list. The threads of a group count their tiles in
+	  group shared memory and reserve their slots in the list with one atomic add per group.
+	A tiny setup pass (TileSetupCS) turns the count into the arguments of the composite's indirect dispatch, so nothing
+	is read back to the CPU.
+=============================================================================*/
+
+#include "/Engine/Private/Common.ush"
+#include "ThinOutlineTile.ush"
+
+//------------------------------------------------------- RECORD MASK
+
+// Sample counts of the horizontal and vertical records (the x channels of the record A textures): positive for a
+// crease record, negative for a silhouette record, zero for none.
+Texture2D<float4> HorizontalA;
+Texture2D<float4> VerticalA;
+RWTexture2D<uint> RWRecordMask;
+
+groupshared uint SharedMask;
+
+[numthreads(THIN_OUTLINE_TILE_SIZE, THIN_OUTLINE_TILE_SIZE, 1)]
+void RecordMaskCS(uint2 GroupId : SV_GroupID, uint2 GroupThreadId : SV_GroupThreadID, uint GroupIndex : SV_GroupIndex)
+{
+	if (GroupIndex == 0)
+	{
+		SharedMask = 0;
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	const int2 ViewportPos = int2(GroupId * THIN_OUTLINE_TILE_SIZE + GroupThreadId);
+	if (all(ViewportPos < int2(View.ViewSizeAndInvSize.xy)))
+	{
+		const int3 Texel = int3(ViewportPos, 0);
+		const float2 SampleCounts = float2(HorizontalA.Load(Texel).x, VerticalA.Load(Texel).x);
+		const uint Block = (GroupThreadId.y / THIN_OUTLINE_MASK_BLOCK_SIZE) * THIN_OUTLINE_MASK_BLOCKS_PER_GROUP + GroupThreadId.x / THIN_OUTLINE_MASK_BLOCK_SIZE;
+		uint Bits = 0;
+		if (any(SampleCounts > 0.0))
+		{
+			Bits |= 1u << Block;
+		}
+		if (any(SampleCounts < 0.0))
+		{
+			Bits |= 1u << (THIN_OUTLINE_MASK_SILHOUETTE_SHIFT + Block);
+		}
+		if (Bits != 0)
+		{
+			InterlockedOr(SharedMask, Bits);
+		}
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	if (GroupIndex == 0)
+	{
+		RWRecordMask[GroupId] = SharedMask;
+	}
+}
+
+//------------------------------------------------------- TILE LIST
+
+Texture2D<uint> RecordMask;
+// Tiles of the target along each axis.
+uint2 TileCount;
+// Rendering pixels per target pixel (1 before the upscaler).
+float2 RenderPixelsPerDisplayPixel;
+RWStructuredBuffer<uint> RWTileCounter;
+RWStructuredBuffer<uint> RWTileList;
+
+groupshared uint SharedTileCount;
+groupshared uint SharedTileBase;
+
+// The record types (THIN_OUTLINE_TILE_CREASE, THIN_OUTLINE_TILE_SILHOUETTE) within a tile's reach.
+uint GetTileRecordTypes(uint2 Tile)
+{
+	// The rendering pixels the tile's target pixels overlap, as the composite finds them (overlaps thinner than
+	// THIN_OUTLINE_MIN_OVERLAP are rounding of the pixel ratio), grown by the margin and clamped to the view.
+	const float2 TileMin = float2(Tile * THIN_OUTLINE_TILE_SIZE) * RenderPixelsPerDisplayPixel;
+	const float2 TileMax = float2(Tile * THIN_OUTLINE_TILE_SIZE + THIN_OUTLINE_TILE_SIZE) * RenderPixelsPerDisplayPixel;
+	const int2 ViewSize = int2(View.ViewSizeAndInvSize.xy);
+	const int2 FirstPixel = max(int2(floor(TileMin + THIN_OUTLINE_MIN_OVERLAP)) - THIN_OUTLINE_TILE_MARGIN, 0);
+	const int2 LastPixel = min(int2(ceil(TileMax - THIN_OUTLINE_MIN_OVERLAP)) - 1 + THIN_OUTLINE_TILE_MARGIN, ViewSize - 1);
+
+	// The 2x2 blocks covering those pixels (the reach grows by up to a pixel), and the 8x8 groups covering the blocks.
+	const int2 FirstBlock = FirstPixel / THIN_OUTLINE_MASK_BLOCK_SIZE;
+	const int2 LastBlock = LastPixel / THIN_OUTLINE_MASK_BLOCK_SIZE;
+	const int2 FirstGroup = FirstBlock / THIN_OUTLINE_MASK_BLOCKS_PER_GROUP;
+	const int2 LastGroup = LastBlock / THIN_OUTLINE_MASK_BLOCKS_PER_GROUP;
+
+	uint Mask = 0;
+	LOOP
+	for (int GroupY = FirstGroup.y; GroupY <= LastGroup.y; ++GroupY)
+	{
+		LOOP
+		for (int GroupX = FirstGroup.x; GroupX <= LastGroup.x; ++GroupX)
+		{
+			// The group's blocks inside the rectangle, as a bit mask over its 4x4 blocks.
+			const int2 GroupBlock = int2(GroupX, GroupY) * THIN_OUTLINE_MASK_BLOCKS_PER_GROUP;
+			const int2 Columns = int2(max(FirstBlock.x - GroupBlock.x, 0), min(LastBlock.x - GroupBlock.x, THIN_OUTLINE_MASK_BLOCKS_PER_GROUP - 1));
+			const int2 Rows = int2(max(FirstBlock.y - GroupBlock.y, 0), min(LastBlock.y - GroupBlock.y, THIN_OUTLINE_MASK_BLOCKS_PER_GROUP - 1));
+			const uint RowBits = ((1u << uint(Columns.y - Columns.x + 1)) - 1u) << uint(Columns.x);
+			uint BlockBits = 0;
+			for (int Row = Rows.x; Row <= Rows.y; ++Row)
+			{
+				BlockBits |= RowBits << uint(THIN_OUTLINE_MASK_BLOCKS_PER_GROUP * Row);
+			}
+			Mask |= RecordMask.Load(int3(GroupX, GroupY, 0)) & (BlockBits | (BlockBits << THIN_OUTLINE_MASK_SILHOUETTE_SHIFT));
+		}
+	}
+
+	uint RecordTypes = 0;
+	if ((Mask & ((1u << THIN_OUTLINE_MASK_SILHOUETTE_SHIFT) - 1u)) != 0)
+	{
+		RecordTypes |= THIN_OUTLINE_TILE_CREASE;
+	}
+	if ((Mask >> THIN_OUTLINE_MASK_SILHOUETTE_SHIFT) != 0)
+	{
+		RecordTypes |= THIN_OUTLINE_TILE_SILHOUETTE;
+	}
+	return RecordTypes;
+}
+
+[numthreads(THIN_OUTLINE_TILE_SIZE, THIN_OUTLINE_TILE_SIZE, 1)]
+void TileClassifyCS(uint2 DispatchThreadId : SV_DispatchThreadID, uint GroupIndex : SV_GroupIndex)
+{
+	if (GroupIndex == 0)
+	{
+		SharedTileCount = 0;
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	const uint2 Tile = DispatchThreadId;
+	uint RecordTypes = 0;
+	if (all(Tile < TileCount))
+	{
+		RecordTypes = GetTileRecordTypes(Tile);
+	}
+
+	// Slots within the group, then one reservation per group in the list.
+	uint LocalSlot = 0;
+	if (RecordTypes != 0)
+	{
+		InterlockedAdd(SharedTileCount, 1u, LocalSlot);
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	if (GroupIndex == 0)
+	{
+		uint Base;
+		InterlockedAdd(RWTileCounter[0], SharedTileCount, Base);
+		SharedTileBase = Base;
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	if (RecordTypes != 0)
+	{
+		RWTileList[SharedTileBase + LocalSlot] = PackTileEntry(Tile, RecordTypes);
+	}
+}
+
+//------------------------------------------------------- INDIRECT ARGUMENTS
+
+// The count as the arguments of the composite's indirect dispatch (one thread group of the tile's size per tile) and
+// of the overwrite pass's indirect draw (one quad of two triangles per tile: vertex count, instance count, first
+// vertex, first instance).
+StructuredBuffer<uint> TileCounter;
+RWBuffer<uint> RWTileIndirectArgs;
+RWBuffer<uint> RWTileDrawIndirectArgs;
+
+[numthreads(1, 1, 1)]
+void TileSetupCS()
+{
+	const uint Count = TileCounter[0];
+	WriteDispatchIndirectArgs(RWTileIndirectArgs, 0, Count, 1, 1);
+	RWTileDrawIndirectArgs[0] = 6;
+	RWTileDrawIndirectArgs[1] = Count;
+	RWTileDrawIndirectArgs[2] = 0;
+	RWTileDrawIndirectArgs[3] = 0;
+}
