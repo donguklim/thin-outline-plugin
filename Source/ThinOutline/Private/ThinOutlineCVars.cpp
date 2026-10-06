@@ -27,7 +27,7 @@ TAutoConsoleVariable<int32> CVarThinOutlineCrease(
 
 TAutoConsoleVariable<int32> CVarThinOutlineDrawAfterUpscaler(
 	TEXT("r.ThinOutline.DrawAfterUpscaler"),
-	0,
+	1,
 	TEXT("Where the outline is drawn (the edge records are kept at rendering resolution before the upscaler either way):\n")
 	TEXT("0 = into scene color at rendering resolution, before the temporal upscaler (TSR, TAA, third party). Pixels painted with\n")
 	TEXT("    a silhouette get the foreground's depth and velocity, so the upscaler moves the outline with the foreground.\n")
@@ -141,7 +141,7 @@ TAutoConsoleVariable<float> CVarThinOutlineSilhouetteCreaseTakeoverSampleCount(
 	TEXT("only when that record's decayed sample count is below this; otherwise the crease sample is ignored. This keeps the\n")
 	TEXT("record of a silhouette's edge pixel, whose sample alternates between a foreground with creases and the background.\n")
 	TEXT("Below 1, so that a silhouette that just got its first sample survives the next frame's crease sample.\n")
-	TEXT("A silhouette sample always takes over a crease record.\n"),
+	TEXT("A silhouette sample takes over a crease record after r.ThinOutline.Estimator.FadeFrames frames in a row.\n"),
 	ECVF_Default
 );
 
@@ -199,10 +199,11 @@ TAutoConsoleVariable<int32> CVarThinOutlineCreaseHistoryFramesWithoutCrease(
 	TEXT("r.ThinOutline.Crease.HistoryFramesWithoutCrease"),
 	3,
 	TEXT("Frames without a crease found at a crease record's pixel after which r.ThinOutline.Crease.HistoryCreaseTest drops the\n")
-	TEXT("record; 0 = a whole jitter cycle (the temporal upscaler's jitter sequence length). Short, because a face that widens\n")
-	TEXT("on screen (turning toward the camera) receives copies of the crease records next to it, each claiming the crease\n")
-	TEXT("runs through its own pixel, and they are drawn until dropped. A crease thinner than a pixel is only found on some\n")
-	TEXT("frames: one found on fewer than about half of them loses its records more often with a short limit.\n"),
+	TEXT("record; 0 = a whole jitter cycle (the temporal upscaler's jitter sequence length). It removes the crease records that\n")
+	TEXT("pass every history test but no longer describe a crease at their pixel: footprints, records slid along a surface,\n")
+	TEXT("copies on a face widening on screen (fast camera turns). A short limit also drops the records of creases found only on\n")
+	TEXT("some frames (sparse samples at junctions), which then blink. 1000 has no effect in practice: a record without samples\n")
+	TEXT("decays below the empty sample count first (about 135 frames from 1 / r.ThinOutline.Estimator.Decay).\n"),
 	ECVF_Default
 );
 
@@ -235,6 +236,26 @@ TAutoConsoleVariable<float> CVarThinOutlineSpatialFilterSigma(
 	ECVF_Default
 );
 
+TAutoConsoleVariable<int32> CVarThinOutlineAxisBlend(
+	TEXT("r.ThinOutline.AxisBlend"),
+	0,
+	TEXT("When a pixel has an edge on both inducer axes (a corner, or an edge near 45 degrees):\n")
+	TEXT("1 = both are drawn, weighted by how clearly one is preferred: by the difference of their absolute slopes in standard\n")
+	TEXT("errors (one alone at r.ThinOutline.AxisBlendScale), moving to the one with the smaller slope standard error as the\n")
+	TEXT("standard errors differ by one to two times r.ThinOutline.Estimator.SlopeSEThreshold. Noise in the fits then cannot\n")
+	TEXT("flip the drawn edge from frame to frame (flicker when drawing after the upscaler).\n")
+	TEXT("0 = one is drawn: the one with the clearly smaller slope standard error, otherwise the smaller absolute slope.\n"),
+	ECVF_Default
+);
+
+TAutoConsoleVariable<float> CVarThinOutlineAxisBlendScale(
+	TEXT("r.ThinOutline.AxisBlendScale"),
+	2.0f,
+	TEXT("r.ThinOutline.AxisBlend: the difference of the two axes' absolute slopes, in standard errors of that difference, at\n")
+	TEXT("which the axis with the smaller slope is drawn alone (equal slopes: half each).\n"),
+	ECVF_Default
+);
+
 TAutoConsoleVariable<float> CVarThinOutlineEstimatorDecay(
 	TEXT("r.ThinOutline.Estimator.Decay"),
 	0.04f,
@@ -243,11 +264,32 @@ TAutoConsoleVariable<float> CVarThinOutlineEstimatorDecay(
 	ECVF_Default
 );
 
-TAutoConsoleVariable<float> CVarThinOutlineEstimatorCoTriggerThreshold(
-	TEXT("r.ThinOutline.Estimator.CoTriggerThreshold"),
+TAutoConsoleVariable<int32> CVarThinOutlineEstimatorFadeFrames(
+	TEXT("r.ThinOutline.Estimator.FadeFrames"),
+	3,
+	TEXT("A record that fails a history test (crease depth test; silhouette depth or background test), or a crease record\n")
+	TEXT("that meets a silhouette sample, is kept and fades instead of being dropped at once; after this many such frames\n")
+	TEXT("in a row it is dropped, or the silhouette takes the axis over. 1 = dropped on the first one.\n")
+	TEXT("Where a pixel's jittered sample misses an edge, or lands on the other surface of a depth step, on one frame of the\n")
+	TEXT("jitter cycle, the outline then dims on that frame instead of disappearing until the record is rebuilt.\n"),
+	ECVF_Default
+);
+
+TAutoConsoleVariable<float> CVarThinOutlineEstimatorFadeMaxSpeed(
+	TEXT("r.ThinOutline.Estimator.FadeMaxSpeed"),
+	0.05f,
+	TEXT("Testing: only a pixel moving slower than this (viewport pixels per frame) fades records (see\n")
+	TEXT("r.ThinOutline.Estimator.FadeFrames); on faster ones a record that fails a history test is dropped at once and a\n")
+	TEXT("silhouette sample takes a crease record over at once, so that records do not trail moving edges and contours that\n")
+	TEXT("move in are not held back. A large value fades at any speed.\n"),
+	ECVF_Default
+);
+
+TAutoConsoleVariable<float> CVarThinOutlineEstimatorFadeFactor(
+	TEXT("r.ThinOutline.Estimator.FadeFactor"),
 	1.0f,
-	TEXT("Maximum fraction of a record's samples taken on frames where both checks of its axis fired (more than one edge\n")
-	TEXT("across the pixel). Records above it are left out of the pooled fit of the pixel and its neighbours.\n"),
+	TEXT("Strength factor of a record per bad frame in a row (see r.ThinOutline.Estimator.FadeFrames): the outline is drawn\n")
+	TEXT("with this to the power of the count. 1 = kept at full strength until dropped.\n"),
 	ECVF_Default
 );
 

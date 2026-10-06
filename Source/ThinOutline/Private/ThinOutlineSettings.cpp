@@ -12,7 +12,7 @@ UThinOutlineSettings::UThinOutlineSettings(const FObjectInitializer& ObjectIniti
 
 	// Keep in sync with the console variable defaults in ThinOutlineCVars.cpp.
 	bEnable = true;
-	bDrawAfterUpscaler = false;
+	bDrawAfterUpscaler = true;
 	bDrawSilhouettes = true;
 	SilhouetteColor = FLinearColor::Black;
 	SilhouetteThreshold = 0.01f;
@@ -36,8 +36,11 @@ UThinOutlineSettings::UThinOutlineSettings(const FObjectInitializer& ObjectIniti
 	CreaseHistoryFramesWithoutCrease = 3;
 	bSpatialFilter = true;
 	SpatialFilterSigma = 0.25f;
+	bAxisBlend = false;
+	AxisBlendScale = 2.0f;
 	EstimatorDecay = 0.04f;
-	CoTriggerThreshold = 1.0f;
+	FadeFrames = 3;
+	FadeFactor = 1.0f;
 	SlopeStandardErrorThreshold = 0.05f;
 	HistoryReprojection = 3;
 }

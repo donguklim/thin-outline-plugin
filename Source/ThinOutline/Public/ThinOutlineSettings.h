@@ -110,7 +110,7 @@ public:
 	 * A pixel keeps one edge record per axis, of either type. A crease sample takes over the axis's silhouette record only when that
 	 * record's decayed sample count is below this; otherwise the crease sample is ignored. This keeps the record of a silhouette's edge
 	 * pixel, whose sample alternates between the background and a foreground with creases. Below 1, so that a silhouette that just got
-	 * its first sample survives the next frame's crease sample. A silhouette sample always takes over a crease record.
+	 * its first sample survives the next frame's crease sample. A silhouette sample takes over a crease record after Fade Frames frames in a row.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Silhouette", meta = (ConsoleVariable = "r.ThinOutline.Silhouette.CreaseTakeoverSampleCount", ClampMin = "0.0", UIMax = "1.0"))
 	float SilhouetteCreaseTakeoverSampleCount;
@@ -166,9 +166,10 @@ public:
 	float CreaseHistoryCreaseTestThreshold;
 
 	/**
-	 * Frames without a crease found after which the crease history test drops a record; 0 = a whole jitter cycle. Short, because a face that
-	 * widens on screen receives copies of the crease records next to it, which are drawn until dropped. A crease thinner than a pixel that is
-	 * found on fewer than about half the frames loses its records more often with a short limit.
+	 * Frames without a crease found after which the crease history test drops a record; 0 = a whole jitter cycle. It removes crease records
+	 * that pass every history test but no longer describe a crease at their pixel: footprints, records slid along a surface, copies on a face
+	 * widening on screen. A short limit also drops the records of creases found only on some frames, which then blink. 1000 has no effect in
+	 * practice: a record without samples decays to empty first.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.HistoryFramesWithoutCrease", ClampMin = "0", UIMax = "32"))
 	int32 CreaseHistoryFramesWithoutCrease;
@@ -182,11 +183,16 @@ public:
 	float EstimatorDecay;
 
 	/**
-	 * Maximum fraction of a record's samples taken on frames where both checks of its axis fired (more than one edge across the pixel).
-	 * Records above it are left out of the pooled fit of the pixel and its neighbours.
+	 * A record that fails a history test, or a crease record that meets a silhouette sample, is kept and fades instead of being dropped at
+	 * once; after this many such frames in a row it is dropped, or the silhouette takes the axis over. 1 = dropped on the first one. Where a
+	 * pixel's jittered sample misses an edge on one frame of the jitter cycle, the outline then dims on that frame instead of disappearing.
 	 */
-	UPROPERTY(config, EditAnywhere, Category = "Estimator", meta = (ConsoleVariable = "r.ThinOutline.Estimator.CoTriggerThreshold", ClampMin = "0.0", ClampMax = "1.0"))
-	float CoTriggerThreshold;
+	UPROPERTY(config, EditAnywhere, Category = "Estimator", meta = (ConsoleVariable = "r.ThinOutline.Estimator.FadeFrames", ClampMin = "1", UIMax = "8"))
+	int32 FadeFrames;
+
+	/** Strength factor of a record per bad frame in a row: the outline is drawn with this to the power of the count. 1 = full strength until dropped. */
+	UPROPERTY(config, EditAnywhere, Category = "Estimator", meta = (ConsoleVariable = "r.ThinOutline.Estimator.FadeFactor", ClampMin = "0.01", ClampMax = "1.0"))
+	float FadeFactor;
 
 	/**
 	 * When a pixel has both a horizontal- and a vertical-inducer edge, the one with the smaller slope standard error is drawn if the
@@ -210,6 +216,19 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Estimator", meta = (ConsoleVariable = "r.ThinOutline.SpatialFilterSigma", ClampMin = "0.001", UIMax = "1.0"))
 	float SpatialFilterSigma;
+
+	/**
+	 * When a pixel has an edge on both inducer axes (a corner, or an edge near 45 degrees), both are drawn, weighted by how clearly one is
+	 * preferred (the difference of their absolute slopes in standard errors, moving to the one with the smaller slope standard error as
+	 * the standard errors differ by one to two times the slope SE threshold), so that noise in the fits cannot flip the drawn edge from
+	 * frame to frame. Off: one is drawn, by the slope SE threshold rule.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Estimator", meta = (ConsoleVariable = "r.ThinOutline.AxisBlend", DisplayName = "Axis Blend"))
+	bool bAxisBlend;
+
+	/** The difference of the two axes' absolute slopes, in standard errors of that difference, at which the axis with the smaller slope is drawn alone. */
+	UPROPERTY(config, EditAnywhere, Category = "Estimator", meta = (ConsoleVariable = "r.ThinOutline.AxisBlendScale", ClampMin = "0.001", UIMax = "5.0"))
+	float AxisBlendScale;
 
 	/**
 	 * How the previous frame's edge records are fetched at the reprojected position. 0 = nearest history pixel (records slip past a

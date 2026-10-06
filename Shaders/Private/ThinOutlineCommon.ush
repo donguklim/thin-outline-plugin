@@ -352,8 +352,10 @@ struct FThinOutlineRecord
 	float2 Mean;
 	float2 Variance;
 	float Covariance;
-	// Fraction of the samples that were recorded on frames where both checks of the axis fired.
-	float CoTriggerRatio;
+	// Bad frames in a row (ThinOutlineRecord.usf, UpdateAxisRecord): frames on which the record failed a history test or,
+	// for a crease record, met a silhouette sample. The outline is drawn with r.ThinOutline.Estimator.FadeFactor to its
+	// power, and the record is dropped at r.ThinOutline.Estimator.FadeFrames.
+	float FadeCount;
 	// Mean edge strength of the samples.
 	float Strength;
 	// Fraction of the samples recorded through the left (top) check. Only stored for silhouettes, where it is close
@@ -369,7 +371,7 @@ FThinOutlineRecord GetEmptyRecord()
 	return (FThinOutlineRecord)0;
 }
 
-// Two RGBA16F textures per axis: A = (n, mean u, mean v, co-trigger ratio), B = (variance u, variance v, covariance,
+// Two RGBA16F textures per axis: A = (n, mean u, mean v, fade count), B = (variance u, variance v, covariance,
 // strength), with -n for silhouette records. The kept ratio and foreground depth of silhouette records are stored
 // separately.
 FThinOutlineRecord UnpackRecord(float4 A, float4 B, out uint EdgeType)
@@ -377,7 +379,7 @@ FThinOutlineRecord UnpackRecord(float4 A, float4 B, out uint EdgeType)
 	FThinOutlineRecord Record;
 	Record.SampleCount = abs(A.x);
 	Record.Mean = A.yz;
-	Record.CoTriggerRatio = A.w;
+	Record.FadeCount = A.w;
 	Record.Variance = B.xy;
 	Record.Covariance = B.z;
 	Record.Strength = B.w;
@@ -389,14 +391,14 @@ FThinOutlineRecord UnpackRecord(float4 A, float4 B, out uint EdgeType)
 
 void PackRecord(FThinOutlineRecord Record, uint EdgeType, out float4 A, out float4 B)
 {
-	A = float4(EdgeType == EDGE_SILHOUETTE ? -Record.SampleCount : Record.SampleCount, Record.Mean, Record.CoTriggerRatio);
+	A = float4(EdgeType == EDGE_SILHOUETTE ? -Record.SampleCount : Record.SampleCount, Record.Mean, Record.FadeCount);
 	B = float4(Record.Variance, Record.Covariance, Record.Strength);
 }
 
 // Exponentially weighted update of the running mean and central moments with one new sample of weight 1.
 // Kept is 1 for a sample of the left (top) check, 0 for one of the right (bottom) check. ForegroundDepth is the linear
 // depth of the foreground (only used by silhouette records).
-void AddRecordSample(inout FThinOutlineRecord Record, float2 Sample, float Kept, float CoTrigger, float Strength, float ForegroundDepth)
+void AddRecordSample(inout FThinOutlineRecord Record, float2 Sample, float Kept, float Strength, float ForegroundDepth)
 {
 	Record.SampleCount += 1.0;
 	const float Alpha = rcp(Record.SampleCount);
@@ -405,7 +407,6 @@ void AddRecordSample(inout FThinOutlineRecord Record, float2 Sample, float Kept,
 	Record.Mean += Alpha * Delta;
 	Record.Variance = (1.0 - Alpha) * (Record.Variance + Alpha * Delta * Delta);
 	Record.Covariance = (1.0 - Alpha) * (Record.Covariance + Alpha * Delta.x * Delta.y);
-	Record.CoTriggerRatio += Alpha * (CoTrigger - Record.CoTriggerRatio);
 	Record.Strength += Alpha * (Strength - Record.Strength);
 	Record.KeptRatio += Alpha * (Kept - Record.KeptRatio);
 	Record.ForegroundDepth += Alpha * (ForegroundDepth - Record.ForegroundDepth);
@@ -434,7 +435,7 @@ FThinOutlineRecord MergeRecords(FThinOutlineRecord Record0, FThinOutlineRecord R
 	const float2 Delta1 = Record1.Mean - Merged.Mean;
 	Merged.Variance = Weight0 * (Record0.Variance + Delta0 * Delta0) + Weight1 * (Record1.Variance + Delta1 * Delta1);
 	Merged.Covariance = Weight0 * (Record0.Covariance + Delta0.x * Delta0.y) + Weight1 * (Record1.Covariance + Delta1.x * Delta1.y);
-	Merged.CoTriggerRatio = Weight0 * Record0.CoTriggerRatio + Weight1 * Record1.CoTriggerRatio;
+	Merged.FadeCount = Weight0 * Record0.FadeCount + Weight1 * Record1.FadeCount;
 	Merged.Strength = Weight0 * Record0.Strength + Weight1 * Record1.Strength;
 	Merged.KeptRatio = Weight0 * Record0.KeptRatio + Weight1 * Record1.KeptRatio;
 	Merged.ForegroundDepth = Weight0 * Record0.ForegroundDepth + Weight1 * Record1.ForegroundDepth;

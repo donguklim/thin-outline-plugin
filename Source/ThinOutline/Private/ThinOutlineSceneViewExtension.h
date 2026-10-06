@@ -30,7 +30,9 @@ struct FThinOutlineRenderSettings
 	float CreaseScale = 0.0f;
 	float CreaseThickness = 0.0f;
 	float EstimatorDecay = 1.0f;
-	float CoTriggerThreshold = 0.0f;
+	int32 FadeFrames = 3;
+	float FadeFactor = 0.5f;
+	float FadeMaxSpeed = 0.05f;
 	float SlopeStandardErrorThreshold = 0.0f;
 	float CreaseHistoryDepthThreshold = 0.0f;
 	bool bCreaseHistoryCreaseTest = true;
@@ -38,6 +40,8 @@ struct FThinOutlineRenderSettings
 	int32 CreaseHistoryFramesWithoutCrease = 0;
 	bool bSpatialFilter = true;
 	float SpatialFilterSigma = 0.25f;
+	bool bAxisBlend = false;
+	float AxisBlendScale = 2.0f;
 	float SilhouetteHistoryDepthThreshold = 0.0f;
 	int32 HistoryReprojection = 0;
 	int32 DebugView = 0;

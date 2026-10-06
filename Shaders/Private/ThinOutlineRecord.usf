@@ -29,6 +29,11 @@
 	rejected when the view direction turns out of the plane through the camera and the edge by too much, relative to the
 	surface with SURFACE_TURN.
 	Then the axis keeps the record of one type (see UpdateAxisRecord).
+	A record that fails a history test, or a crease record that meets a silhouette sample, is not dropped at once: its fade
+	count (bad frames in a row) goes up, the outline is drawn fainter (r.ThinOutline.Estimator.FadeFactor to the power of
+	the count), and only at r.ThinOutline.Estimator.FadeFrames bad frames in a row is the record dropped or taken over. A
+	pixel whose jittered sample lands on the other surface of a depth step or sliver, or misses an edge, on one frame of
+	the jitter cycle then dims on that frame instead of losing the record and rebuilding it over several frames.
 =============================================================================*/
 
 #include "ThinOutlineCommon.ush"
@@ -63,6 +68,12 @@ float SilhouetteHistoryDepthThreshold;
 float SilhouetteHistorySinAngle;
 // A crease sample only takes over a silhouette record with fewer samples than this.
 float SilhouetteCreaseTakeoverSampleCount;
+// r.ThinOutline.Estimator.FadeFrames: bad frames in a row after which a record is dropped or taken over.
+float FadeLimit;
+// r.ThinOutline.Estimator.FadeMaxSpeed, in viewport pixels per frame: a pixel moving faster drops a record that fails a
+// history test at once, and a silhouette sample takes its crease record over at once, as without fades, so that records
+// do not trail moving edges and contours that move in are not held back.
+float FadeMaxSpeed;
 // Keep level of the crease history test (CREASE_HISTORY_TEST): the crease thresholds scaled by
 // r.ThinOutline.Crease.HistoryCreaseTestThreshold; and the frames without a crease after which a crease record is
 // dropped (r.ThinOutline.Crease.HistoryFramesWithoutCrease, or the jitter sequence length).
@@ -277,7 +288,8 @@ uint GetNearCreaseMask(FThinOutlineEdges Edges)
 
 // The crease history test of one axis's reprojected crease record (CREASE_HISTORY_TEST): its count of frames since a
 // crease was last found at the pixel along the axis restarts when one is found this frame, and the record is dropped
-// when the count reaches CreaseHistoryMissLimit (r.ThinOutline.Crease.HistoryFramesWithoutCrease, 3; 0 = a jitter cycle).
+// when the count reaches CreaseHistoryMissLimit (r.ThinOutline.Crease.HistoryFramesWithoutCrease, 3; 1000 = in effect
+// never; 0 = a jitter cycle).
 // The depth test cannot see a record that slid along one depth-continuous surface (a foot's crease left on the floor it
 // stood on, a junction's crease carried onto the curved wall next to it), since a crease joins two such surfaces by
 // definition. Nor copies: the history only shifts records, so on a face that widens on screen (turning toward the
@@ -395,8 +407,25 @@ bool HasViewTurnedOffContour(FThinOutlineRecord Record, bool bVerticalAxis, int2
 #endif
 }
 
+// A history tap that fails its depth test is still merged, at this fraction of its weight: next to a tap that passes it
+// changes nothing, and alone it keeps the record, which then fades (UpdateAxisRecord) instead of being dropped.
+#define FAILED_TAP_WEIGHT 1.0e-3
+
+// A reprojected record made only of taps that failed their depth test: their weights are restored, and it counts as
+// failed.
+bool RestoreFailedRecord(inout FThinOutlineRecord Record, float PassedWeight)
+{
+	const bool bFailed = Record.SampleCount > 0.0 && PassedWeight <= 0.0;
+	if (bFailed)
+	{
+		Record.SampleCount /= FAILED_TAP_WEIGHT;
+	}
+	return bFailed;
+}
+
 // Fetches the previous frame's records with the velocity of the history foreground (see FindHistoryForeground), moved
-// into this pixel's local coordinates, and applies the history tests.
+// into this pixel's local coordinates, and applies the history tests. A record that fails them is kept and reported
+// as failed (see the top of the file); the view-angle test, the range drop and the crease miss limit still drop it.
 void ReprojectHistory(
 	int2 ViewportPos,
 	int2 PixelPos,
@@ -408,12 +437,24 @@ void ReprojectHistory(
 	out FThinOutlineRecord CreaseHorizontal,
 	out FThinOutlineRecord CreaseVertical,
 	out FThinOutlineRecord SilhouetteHorizontal,
-	out FThinOutlineRecord SilhouetteVertical)
+	out FThinOutlineRecord SilhouetteVertical,
+	out bool bCreaseHorizontalFailed,
+	out bool bCreaseVerticalFailed,
+	out bool bSilhouetteHorizontalFailed,
+	out bool bSilhouetteVerticalFailed,
+	out float FailedCreaseDepth,
+	out bool bMoving)
 {
 	CreaseHorizontal = GetEmptyRecord();
 	CreaseVertical = GetEmptyRecord();
 	SilhouetteHorizontal = GetEmptyRecord();
 	SilhouetteVertical = GetEmptyRecord();
+	bCreaseHorizontalFailed = false;
+	bCreaseVerticalFailed = false;
+	bSilhouetteHorizontalFailed = false;
+	bSilhouetteVerticalFailed = false;
+	FailedCreaseDepth = 0.0;
+	bMoving = false;
 
 	// Sky has no surface to keep records for, unless it is the background next to a foreground this frame.
 	if (Center.bIsSky && !Foreground.bFound)
@@ -441,6 +482,14 @@ void ReprojectHistory(
 	// velocity is used.
 	const float DepthShift = ConvertFromDeviceZ(Foreground.DeviceZ - Velocity.z) - Foreground.Depth;
 
+	// Bilinear weight of the taps that passed their depth test, per record; depth of the crease taps that failed it.
+	float FailedCreaseDepthSum = 0.0;
+	float FailedCreaseWeight = 0.0;
+	float CreaseHorizontalPassed = 0.0;
+	float CreaseVerticalPassed = 0.0;
+	float SilhouetteHorizontalPassed = 0.0;
+	float SilhouetteVerticalPassed = 0.0;
+
 	UNROLL
 	for (uint Index = 0; Index < 4; ++Index)
 	{
@@ -460,8 +509,10 @@ void ReprojectHistory(
 			const bool bVerticalCrease = !Center.bIsSky && VerticalType == EDGE_CREASE && TapVertical.SampleCount > 0.0;
 
 			BRANCH
-			if ((bHorizontalCrease || bVerticalCrease) && abs(HistoryDepth.Load(Texel) - PrevDepth) <= CreaseTolerance)
+			if (bHorizontalCrease || bVerticalCrease)
 			{
+				const float TapDepth = HistoryDepth.Load(Texel);
+				const bool bKeep = abs(TapDepth - PrevDepth) <= CreaseTolerance;
 #if CREASE_HISTORY_TEST
 				// The frames since a crease was last found (see UpdateCreaseMissCount), merged like the other values.
 				const float4 TapMissCounts = HistorySilhouetteForeground.Load(Texel);
@@ -470,12 +521,16 @@ void ReprojectHistory(
 #endif
 				if (bHorizontalCrease)
 				{
-					AddHistoryRecord(CreaseHorizontal, TapHorizontal, Taps.Offsets[Index].xy, Taps.Weights[Index]);
+					AddHistoryRecord(CreaseHorizontal, TapHorizontal, Taps.Offsets[Index].xy, Taps.Weights[Index] * (bKeep ? 1.0 : FAILED_TAP_WEIGHT));
+					CreaseHorizontalPassed += bKeep ? Taps.Weights[Index] : 0.0;
 				}
 				if (bVerticalCrease)
 				{
-					AddHistoryRecord(CreaseVertical, TapVertical, Taps.Offsets[Index].yx, Taps.Weights[Index]);
+					AddHistoryRecord(CreaseVertical, TapVertical, Taps.Offsets[Index].yx, Taps.Weights[Index] * (bKeep ? 1.0 : FAILED_TAP_WEIGHT));
+					CreaseVerticalPassed += bKeep ? Taps.Weights[Index] : 0.0;
 				}
+				FailedCreaseDepthSum += bKeep ? 0.0 : TapDepth * Taps.Weights[Index];
+				FailedCreaseWeight += bKeep ? 0.0 : Taps.Weights[Index];
 			}
 
 			BRANCH
@@ -487,17 +542,27 @@ void ReprojectHistory(
 				TapHorizontal.ForegroundDepth = TapForeground.z / THIN_OUTLINE_FOREGROUND_DEPTH_STORE_SCALE - DepthShift;
 				TapVertical.ForegroundDepth = TapForeground.w / THIN_OUTLINE_FOREGROUND_DEPTH_STORE_SCALE - DepthShift;
 
-				if (HorizontalType == EDGE_SILHOUETTE && IsForegroundInPlace(TapHorizontal, Center.Depth, Neighbours[0].Depth, Neighbours[1].Depth))
+				if (HorizontalType == EDGE_SILHOUETTE)
 				{
-					AddHistoryRecord(SilhouetteHorizontal, TapHorizontal, Taps.Offsets[Index].xy, Taps.Weights[Index]);
+					const bool bKeep = IsForegroundInPlace(TapHorizontal, Center.Depth, Neighbours[0].Depth, Neighbours[1].Depth);
+					AddHistoryRecord(SilhouetteHorizontal, TapHorizontal, Taps.Offsets[Index].xy, Taps.Weights[Index] * (bKeep ? 1.0 : FAILED_TAP_WEIGHT));
+					SilhouetteHorizontalPassed += bKeep ? Taps.Weights[Index] : 0.0;
 				}
-				if (VerticalType == EDGE_SILHOUETTE && IsForegroundInPlace(TapVertical, Center.Depth, Neighbours[2].Depth, Neighbours[3].Depth))
+				if (VerticalType == EDGE_SILHOUETTE)
 				{
-					AddHistoryRecord(SilhouetteVertical, TapVertical, Taps.Offsets[Index].yx, Taps.Weights[Index]);
+					const bool bKeep = IsForegroundInPlace(TapVertical, Center.Depth, Neighbours[2].Depth, Neighbours[3].Depth);
+					AddHistoryRecord(SilhouetteVertical, TapVertical, Taps.Offsets[Index].yx, Taps.Weights[Index] * (bKeep ? 1.0 : FAILED_TAP_WEIGHT));
+					SilhouetteVerticalPassed += bKeep ? Taps.Weights[Index] : 0.0;
 				}
 			}
 		}
 	}
+
+	bCreaseHorizontalFailed = RestoreFailedRecord(CreaseHorizontal, CreaseHorizontalPassed);
+	bCreaseVerticalFailed = RestoreFailedRecord(CreaseVertical, CreaseVerticalPassed);
+	bSilhouetteHorizontalFailed = RestoreFailedRecord(SilhouetteHorizontal, SilhouetteHorizontalPassed);
+	bSilhouetteVerticalFailed = RestoreFailedRecord(SilhouetteVertical, SilhouetteVerticalPassed);
+	FailedCreaseDepth = FailedCreaseWeight > 0.0 ? FailedCreaseDepthSum / FailedCreaseWeight : 0.0;
 
 #if CREASE_HISTORY_TEST
 	UpdateCreaseMissCount(CreaseHorizontal, (NearCreaseMask & 0x3u) != 0);
@@ -506,11 +571,38 @@ void ReprojectHistory(
 
 	if (SilhouetteHorizontal.SampleCount > 0.0 && !HasBackgroundInReach(SilhouetteHorizontal, 0, BackgroundInReachMask))
 	{
-		SilhouetteHorizontal = GetEmptyRecord();
+		bSilhouetteHorizontalFailed = true;
 	}
 	if (SilhouetteVertical.SampleCount > 0.0 && !HasBackgroundInReach(SilhouetteVertical, 2, BackgroundInReachMask))
 	{
-		SilhouetteVertical = GetEmptyRecord();
+		bSilhouetteVerticalFailed = true;
+	}
+
+	// Moving pixels drop failed records at once.
+	bMoving = length(Velocity.xy * View.ViewSizeAndInvSize.xy * 0.5) >= FadeMaxSpeed;
+	BRANCH
+	if (bMoving)
+	{
+		if (bCreaseHorizontalFailed)
+		{
+			CreaseHorizontal = GetEmptyRecord();
+			bCreaseHorizontalFailed = false;
+		}
+		if (bCreaseVerticalFailed)
+		{
+			CreaseVertical = GetEmptyRecord();
+			bCreaseVerticalFailed = false;
+		}
+		if (bSilhouetteHorizontalFailed)
+		{
+			SilhouetteHorizontal = GetEmptyRecord();
+			bSilhouetteHorizontalFailed = false;
+		}
+		if (bSilhouetteVerticalFailed)
+		{
+			SilhouetteVertical = GetEmptyRecord();
+			bSilhouetteVerticalFailed = false;
+		}
 	}
 
 #if VIEW_ANGLE_TEST
@@ -546,17 +638,13 @@ void ReprojectHistory(
 // depth (silhouettes only).
 void AddAxisSamples(inout FThinOutlineRecord Record, float2 Sample, float FirstStrength, float SecondStrength, float ForegroundDepth)
 {
-	const bool bFirst = FirstStrength > 0.0;
-	const bool bSecond = SecondStrength > 0.0;
-	const float CoTrigger = bFirst && bSecond ? 1.0 : 0.0;
-
-	if (bFirst)
+	if (FirstStrength > 0.0)
 	{
-		AddRecordSample(Record, Sample, 1.0, CoTrigger, FirstStrength, ForegroundDepth);
+		AddRecordSample(Record, Sample, 1.0, FirstStrength, ForegroundDepth);
 	}
-	if (bSecond)
+	if (SecondStrength > 0.0)
 	{
-		AddRecordSample(Record, Sample + float2(0.5, 0.0), 0.0, CoTrigger, SecondStrength, ForegroundDepth);
+		AddRecordSample(Record, Sample + float2(0.5, 0.0), 0.0, SecondStrength, ForegroundDepth);
 	}
 }
 
@@ -569,12 +657,21 @@ void FinalizeRecord(inout FThinOutlineRecord Record)
 }
 
 // Picks the record one axis keeps from its reprojected crease and silhouette records (already decayed), and adds this
-// frame's samples of that type. A silhouette sample always takes the record over. A crease sample only takes over a
-// silhouette record that has faded below SilhouetteCreaseTakeoverSampleCount, and is ignored otherwise: the pixel at the
-// contour samples the foreground, which may have creases, on some frames and the background on others.
+// frame's samples of that type. A crease sample only takes over a silhouette record that has faded below
+// SilhouetteCreaseTakeoverSampleCount, and is ignored otherwise: the pixel at the contour samples the foreground, which
+// may have creases, on some frames and the background on others. A silhouette history that holds still wins over a
+// crease history.
+// Fade counts: a record's count of bad frames in a row goes up when it failed a history test this frame (bFailed) or, for
+// a crease record, when a silhouette sample arrives; it restarts at 0 on any other frame. At FadeLimit the record is
+// dropped. So a silhouette sample only takes over a crease record after FadeLimit frames in a row, or at once on a moving
+// pixel (bMoving): sporadic silhouette samples on an edge sampled mostly as a crease do not reset its record, while a
+// contour that moves in takes over. A crease sample does not count against a silhouette record, for the reason above.
 void UpdateAxisRecord(
+	bool bMoving,
 	FThinOutlineRecord CreaseRecord,
+	bool bCreaseFailed,
 	FThinOutlineRecord SilhouetteRecord,
+	bool bSilhouetteFailed,
 	float2 Sample,
 	float FirstCrease,
 	float SecondCrease,
@@ -586,9 +683,22 @@ void UpdateAxisRecord(
 {
 	const bool bSilhouetteSample = max(FirstSilhouette, SecondSilhouette) > 0.0;
 	const bool bCreaseSample = max(FirstCrease, SecondCrease) > 0.0;
+
+	const float CreaseBadFrame = bSilhouetteSample && bMoving ? FadeLimit : 1.0;
+	CreaseRecord.FadeCount = bCreaseFailed || bSilhouetteSample ? CreaseRecord.FadeCount + CreaseBadFrame : 0.0;
+	SilhouetteRecord.FadeCount = bSilhouetteFailed ? SilhouetteRecord.FadeCount + 1.0 : 0.0;
+	if (CreaseRecord.FadeCount >= FadeLimit)
+	{
+		CreaseRecord = GetEmptyRecord();
+	}
+	if (SilhouetteRecord.FadeCount >= FadeLimit)
+	{
+		SilhouetteRecord = GetEmptyRecord();
+	}
+
 	const bool bSilhouetteHolds = SilhouetteRecord.SampleCount > 0.0 && SilhouetteRecord.SampleCount >= SilhouetteCreaseTakeoverSampleCount;
 
-	if (bSilhouetteSample || bSilhouetteHolds)
+	if (bSilhouetteHolds || (bSilhouetteSample && CreaseRecord.SampleCount <= 0.0))
 	{
 		// A silhouette check fires on the foreground pixel, toward the background.
 		Record = SilhouetteRecord;
@@ -633,13 +743,20 @@ void MainCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 	FThinOutlineRecord CreaseVertical = GetEmptyRecord();
 	FThinOutlineRecord SilhouetteHorizontal = GetEmptyRecord();
 	FThinOutlineRecord SilhouetteVertical = GetEmptyRecord();
+	bool bCreaseHorizontalFailed = false;
+	bool bCreaseVerticalFailed = false;
+	bool bSilhouetteHorizontalFailed = false;
+	bool bSilhouetteVerticalFailed = false;
+	float FailedCreaseDepth = 0.0;
+	bool bMoving = false;
 	if (bHistoryValid != 0)
 	{
 		const uint BackgroundInReachMask = GetBackgroundInReachMask(Center, Neighbours, FarNeighbours, Edges);
 		const uint NearCreaseMask = GetNearCreaseMask(Edges);
 		const FThinOutlineForeground Foreground = FindHistoryForeground(PixelPos, Center, Neighbours, Edges);
 		ReprojectHistory(ViewportPos, PixelPos, Foreground, Center, Neighbours, BackgroundInReachMask, NearCreaseMask,
-			CreaseHorizontal, CreaseVertical, SilhouetteHorizontal, SilhouetteVertical);
+			CreaseHorizontal, CreaseVertical, SilhouetteHorizontal, SilhouetteVertical,
+			bCreaseHorizontalFailed, bCreaseVerticalFailed, bSilhouetteHorizontalFailed, bSilhouetteVerticalFailed, FailedCreaseDepth, bMoving);
 		// Silhouette records are bounded by the background test instead: the bilinear history spreads a moving contour's
 		// records over one more pixel each frame, and the range drop cut the share that lands one pixel inside the
 		// foreground (a tenth of the silhouette under a steady pan) although its contour is still next to it.
@@ -656,10 +773,10 @@ void MainCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 	FThinOutlineRecord Vertical;
 	uint HorizontalType;
 	uint VerticalType;
-	UpdateAxisRecord(CreaseHorizontal, SilhouetteHorizontal, SampleLocalPosition.xy,
+	UpdateAxisRecord(bMoving, CreaseHorizontal, bCreaseHorizontalFailed, SilhouetteHorizontal, bSilhouetteHorizontalFailed, SampleLocalPosition.xy,
 		Edges.Crease[0], Edges.Crease[1], Edges.Silhouette[0], Edges.Silhouette[1], Center.Depth,
 		Horizontal, HorizontalType);
-	UpdateAxisRecord(CreaseVertical, SilhouetteVertical, SampleLocalPosition.yx,
+	UpdateAxisRecord(bMoving, CreaseVertical, bCreaseVerticalFailed, SilhouetteVertical, bSilhouetteVerticalFailed, SampleLocalPosition.yx,
 		Edges.Crease[2], Edges.Crease[3], Edges.Silhouette[2], Edges.Silhouette[3], Center.Depth,
 		Vertical, VerticalType);
 
@@ -687,6 +804,15 @@ void MainCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 		bHorizontalSilhouette ? Horizontal.ForegroundDepth * THIN_OUTLINE_FOREGROUND_DEPTH_STORE_SCALE : HorizontalCreaseMisses,
 		bVerticalSilhouette ? Vertical.ForegroundDepth * THIN_OUTLINE_FOREGROUND_DEPTH_STORE_SCALE : VerticalCreaseMisses);
 
+	// A crease record kept through a failed depth test belongs to the surface it was recorded on, so that surface's depth
+	// is stored with it: tested against this frame's depth next frame, it would pass and the record would be adopted by
+	// the surface the pixel shows now. Unless the other axis keeps a crease record of this surface (one depth per pixel).
+	const bool bHorizontalFailedCrease = HorizontalType == EDGE_CREASE && Horizontal.SampleCount > 0.0 && bCreaseHorizontalFailed && Horizontal.FadeCount > 0.0;
+	const bool bVerticalFailedCrease = VerticalType == EDGE_CREASE && Vertical.SampleCount > 0.0 && bCreaseVerticalFailed && Vertical.FadeCount > 0.0;
+	const bool bHorizontalCurrentCrease = HorizontalType == EDGE_CREASE && Horizontal.SampleCount > 0.0 && !bHorizontalFailedCrease;
+	const bool bVerticalCurrentCrease = VerticalType == EDGE_CREASE && Vertical.SampleCount > 0.0 && !bVerticalFailedCrease;
+	const bool bKeepFailedDepth = (bHorizontalFailedCrease || bVerticalFailedCrease) && !bHorizontalCurrentCrease && !bVerticalCurrentCrease;
+
 	// Zero never passes the depth test, so sky does not hand out crease history.
-	RWDepth[ViewportPos] = Center.bIsSky ? 0.0 : Center.Depth;
+	RWDepth[ViewportPos] = Center.bIsSky ? 0.0 : (bKeepFailedDepth ? FailedCreaseDepth : Center.Depth);
 }

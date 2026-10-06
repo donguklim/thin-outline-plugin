@@ -90,10 +90,13 @@ namespace ThinOutline
 		Parameters.RenderPixelsPerDisplayPixel = RenderPixelsPerDisplayPixel;
 		Parameters.CreaseThickness             = Settings.CreaseThickness * MeanRenderPixelsPerDisplayPixel;
 		Parameters.SilhouetteThickness         = Settings.SilhouetteThickness * MeanRenderPixelsPerDisplayPixel;
-		Parameters.CoTriggerThreshold          = Settings.CoTriggerThreshold;
+		Parameters.FadeLog2Factor              = FMath::Log2(Settings.FadeFactor);
+		Parameters.FadeLimit                   = float(Settings.FadeFrames);
 		Parameters.SlopeStandardErrorThreshold = Settings.SlopeStandardErrorThreshold;
 		Parameters.bSpatialFilter              = Settings.bSpatialFilter ? 1 : 0;
 		Parameters.SpatialFilterSigma          = Settings.SpatialFilterSigma;
+		Parameters.bAxisBlend                  = Settings.bAxisBlend ? 1 : 0;
+		Parameters.AxisBlendScale              = Settings.AxisBlendScale;
 		Parameters.DistinctSampleScale         = FMath::Min(1.0f, Settings.EstimatorDecay * float(FMath::Max(ViewInfo.TemporalJitterSequenceLength, 1)));
 		Parameters.SaturatedSampleCount        = 1.0f / Settings.EstimatorDecay;
 		Parameters.DebugView                   = static_cast<uint32>(FMath::Max(Settings.DebugView, 0));
@@ -165,7 +168,9 @@ void FThinOutlineSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& InV
 	Settings.CreaseScale                         = FMath::Max(0.0f, CVarThinOutlineCreaseScale.GetValueOnGameThread());
 	Settings.CreaseThickness                     = FMath::Max(0.0f, CVarThinOutlineCreaseThickness.GetValueOnGameThread());
 	Settings.EstimatorDecay                      = FMath::Clamp(CVarThinOutlineEstimatorDecay.GetValueOnGameThread(), 0.001f, 1.0f);
-	Settings.CoTriggerThreshold                  = FMath::Max(0.0f, CVarThinOutlineEstimatorCoTriggerThreshold.GetValueOnGameThread());
+	Settings.FadeFrames                          = FMath::Max(1, CVarThinOutlineEstimatorFadeFrames.GetValueOnGameThread());
+	Settings.FadeFactor                          = FMath::Clamp(CVarThinOutlineEstimatorFadeFactor.GetValueOnGameThread(), 0.01f, 1.0f);
+	Settings.FadeMaxSpeed                        = FMath::Max(0.0f, CVarThinOutlineEstimatorFadeMaxSpeed.GetValueOnGameThread());
 	Settings.SlopeStandardErrorThreshold         = FMath::Max(0.0f, CVarThinOutlineEstimatorSlopeSEThreshold.GetValueOnGameThread());
 	Settings.CreaseHistoryDepthThreshold         = FMath::Max(0.0f, CVarThinOutlineCreaseHistoryDepthThreshold.GetValueOnGameThread());
 	Settings.bCreaseHistoryCreaseTest            = CVarThinOutlineCreaseHistoryCreaseTest.GetValueOnGameThread() != 0;
@@ -174,6 +179,8 @@ void FThinOutlineSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& InV
 	Settings.CreaseHistoryFramesWithoutCrease    = FMath::Max(0, CVarThinOutlineCreaseHistoryFramesWithoutCrease.GetValueOnGameThread());
 	Settings.bSpatialFilter                      = CVarThinOutlineSpatialFilter.GetValueOnGameThread() != 0;
 	Settings.SpatialFilterSigma                  = FMath::Max(0.001f, CVarThinOutlineSpatialFilterSigma.GetValueOnGameThread());
+	Settings.bAxisBlend                          = CVarThinOutlineAxisBlend.GetValueOnGameThread() != 0;
+	Settings.AxisBlendScale                      = FMath::Max(0.001f, CVarThinOutlineAxisBlendScale.GetValueOnGameThread());
 	Settings.SilhouetteHistoryDepthThreshold     = FMath::Max(0.0f, CVarThinOutlineSilhouetteHistoryDepthThreshold.GetValueOnGameThread());
 	Settings.HistoryReprojection                 = FMath::Clamp(CVarThinOutlineEstimatorHistoryReprojection.GetValueOnGameThread(), 0, 3);
 	Settings.DebugView                           = CVarThinOutlineDebugView.GetValueOnGameThread();
@@ -319,6 +326,8 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->SilhouetteHistoryDepthThreshold     = Settings.SilhouetteHistoryDepthThreshold;
 		PassParameters->SilhouetteHistorySinAngle           = FMath::Sin(FMath::DegreesToRadians(Settings.SilhouetteHistoryViewAngle));
 		PassParameters->SilhouetteCreaseTakeoverSampleCount = Settings.SilhouetteCreaseTakeoverSampleCount;
+		PassParameters->FadeLimit                           = float(Settings.FadeFrames);
+		PassParameters->FadeMaxSpeed                        = Settings.FadeMaxSpeed;
 		PassParameters->CreaseHistoryKeepRidgeThreshold     = Settings.CreaseHistoryCreaseTestThreshold * Settings.CreaseRidgeThreshold;
 		PassParameters->CreaseHistoryKeepValleyThreshold    = Settings.CreaseHistoryCreaseTestThreshold * Settings.CreaseValleyThreshold;
 		PassParameters->CreaseHistoryMissLimit              = float(Settings.CreaseHistoryFramesWithoutCrease > 0

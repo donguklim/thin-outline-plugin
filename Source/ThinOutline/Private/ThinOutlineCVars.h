@@ -38,10 +38,14 @@ extern TAutoConsoleVariable<float> CVarThinOutlineCreaseHistoryCreaseTestThresho
 extern TAutoConsoleVariable<int32> CVarThinOutlineCreaseHistoryFramesWithoutCrease;
 extern TAutoConsoleVariable<int32> CVarThinOutlineSpatialFilter;
 extern TAutoConsoleVariable<float> CVarThinOutlineSpatialFilterSigma;
+extern TAutoConsoleVariable<int32> CVarThinOutlineAxisBlend;
+extern TAutoConsoleVariable<float> CVarThinOutlineAxisBlendScale;
 
 // Temporal edge estimator (per-pixel OLS edge records)
 extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorDecay;
-extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorCoTriggerThreshold;
+extern TAutoConsoleVariable<int32> CVarThinOutlineEstimatorFadeFrames;
+extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorFadeFactor;
+extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorFadeMaxSpeed;
 extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorSlopeSEThreshold;
 extern TAutoConsoleVariable<int32> CVarThinOutlineEstimatorHistoryReprojection;
 
