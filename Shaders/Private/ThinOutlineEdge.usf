@@ -1,0 +1,52 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+/*=============================================================================
+	ThinOutlineEdge.usf: the edge pass. Once per rendering pixel, reconstructs the edge the pixel draws from the edge
+	records (ThinOutlineSelect.ush: the pooled fits of both axes, the choice between them, the spatial filter, the dense
+	and the isolated edge suppression) and leaves it in the DrawnEdge texture (PackDrawnEdge), from which the composites
+	(ThinOutline.usf) compute the coverage of the band in each display pixel. Before 2026-10-10 the composites did this
+	work themselves, the one after the upscaler up to four times per rendering pixel (once per display pixel overlapping
+	it). From 2026-10-10 to 10-11 the pass also stabilized the drawn alpha against flicker the way TSR does
+	(Docs/Design/Alpha-Flicker-Suppression.md); removed once the crease presence and the spike filter made it redundant.
+	Runs on the rendering tiles of r.ThinOutline.TileClassification (one 8x8 group per listed tile, indirect) or on
+	every tile of the view; the texture is cleared first, so pixels of tiles that do not run draw nothing.
+=============================================================================*/
+
+#include "ThinOutlineSelect.ush"
+
+// The listed rendering tiles (ThinOutlineTileClassify.usf), or with bUseTileList 0 all tiles of the view, TileCountX
+// across.
+StructuredBuffer<uint> TileList;
+uint bUseTileList;
+uint TileCountX;
+RWTexture2D<float4> RWDrawnEdge;
+
+[numthreads(THIN_OUTLINE_TILE_SIZE, THIN_OUTLINE_TILE_SIZE, 1)]
+void EdgeCS(uint GroupId : SV_GroupID, uint2 GroupThreadId : SV_GroupThreadID)
+{
+	const uint2 Tile = bUseTileList != 0 ? UnpackTileEntryCoord(TileList[GroupId]) : uint2(GroupId % TileCountX, GroupId / TileCountX);
+	const int2 ViewportPos = int2(Tile * THIN_OUTLINE_TILE_SIZE + GroupThreadId);
+	const int2 ViewSize = int2(View.ViewSizeAndInvSize.xy);
+	if (any(ViewportPos >= ViewSize))
+	{
+		return;
+	}
+
+	const FThinOutlineAxisRecords HorizontalRecords = LoadAxisRecords(AXIS_HORIZONTAL, ViewportPos);
+	const FThinOutlineAxisRecords VerticalRecords = LoadAxisRecords(AXIS_VERTICAL, ViewportPos);
+	FThinOutlineSelection Selection = SelectEdge(HorizontalRecords, VerticalRecords);
+	// The spatial filter, the dense edge suppression and the isolated edge suppression (each by its switch).
+	BRANCH
+	if (Selection.bValid)
+	{
+		RefineSelection(Selection, HorizontalRecords, VerticalRecords, ViewportPos);
+	}
+
+	// A suppressed edge is kept with its flag, for debug view 7; the composites draw nothing for it.
+	float4 Packed = float4(0.0, 0.0, 0.0, 0.0);
+	if (Selection.bValid)
+	{
+		Packed = PackDrawnEdge(Selection.Selected, Selection.bSilhouette, Selection.bVertical, Selection.bSuppressed, Selection.bIsolated);
+	}
+	RWDrawnEdge[ViewportPos] = Packed;
+}

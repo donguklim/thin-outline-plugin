@@ -19,6 +19,9 @@ BEGIN_SHADER_PARAMETER_STRUCT(FThinOutlineEdgeCheckParameters, )
 	SHADER_PARAMETER(float, CreaseRidgeThreshold)
 	SHADER_PARAMETER(float, CreaseValleyThreshold)
 	SHADER_PARAMETER(float, CreaseScale)
+	SHADER_PARAMETER(uint32, bCreaseSpikeFilter)
+	SHADER_PARAMETER(float, CreaseSpikeThreshold)
+	SHADER_PARAMETER(float, CreaseSpikePlaneTolerance)
 END_SHADER_PARAMETER_STRUCT()
 
 // Adds this frame's jittered edge check results to the per-pixel edge records, carrying the records over from the
@@ -37,9 +40,12 @@ public:
 	class FViewAngleTestDim : SHADER_PERMUTATION_BOOL("VIEW_ANGLE_TEST");
 	// r.ThinOutline.Silhouette.HistorySurfaceTurn: the view-angle test relative to the surface's own turn.
 	class FSurfaceTurnDim : SHADER_PERMUTATION_BOOL("SURFACE_TURN");
-	// r.ThinOutline.Crease.HistoryCreaseTest: crease records are dropped after a jitter cycle without a crease found.
-	class FCreaseHistoryTestDim : SHADER_PERMUTATION_BOOL("CREASE_HISTORY_TEST");
-	using FPermutationDomain = TShaderPermutationDomain<FBackgroundDepthStepDim, FViewAngleTestDim, FSurfaceTurnDim, FCreaseHistoryTestDim>;
+	// r.ThinOutline.Crease.Presence: crease records carry the fraction of recent frames with a crease found at their pixel
+	// and are dropped when it sinks below the drop level.
+	class FCreasePresenceDim : SHADER_PERMUTATION_BOOL("CREASE_PRESENCE");
+	// r.ThinOutline.Crease.SpikeFilter: the crease checks skip one-pixel normal spikes (loads the normals two pixels away).
+	class FCreaseSpikeFilterDim : SHADER_PERMUTATION_BOOL("CREASE_SPIKE_FILTER");
+	using FPermutationDomain = TShaderPermutationDomain<FBackgroundDepthStepDim, FViewAngleTestDim, FSurfaceTurnDim, FCreasePresenceDim, FCreaseSpikeFilterDim>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
@@ -69,7 +75,8 @@ public:
 		SHADER_PARAMETER(float, FadeMaxSpeed)
 		SHADER_PARAMETER(float, CreaseHistoryKeepRidgeThreshold)
 		SHADER_PARAMETER(float, CreaseHistoryKeepValleyThreshold)
-		SHADER_PARAMETER(float, CreaseHistoryMissLimit)
+		SHADER_PARAMETER(float, CreasePresenceRate)
+		SHADER_PARAMETER(float, CreasePresenceDropLevel)
 		SHADER_PARAMETER(uint32, bHistoryValid)
 		SHADER_PARAMETER(uint32, bHistoryMaskValid)
 		SHADER_PARAMETER(uint32, HistoryReprojectionMode)
@@ -113,6 +120,12 @@ BEGIN_SHADER_PARAMETER_STRUCT(FThinOutlineCompositeParameters, )
 	SHADER_PARAMETER(float, SpatialFilterSigma)
 	SHADER_PARAMETER(uint32, bAxisBlend)
 	SHADER_PARAMETER(float, AxisBlendScale)
+	SHADER_PARAMETER(uint32, DenseEdgeSuppression)
+	SHADER_PARAMETER(float, DenseEdgeTolerance)
+	SHADER_PARAMETER(uint32, bIsolatedEdgeSuppression)
+	SHADER_PARAMETER(uint32, bCreasePresence)
+	SHADER_PARAMETER(float, CreasePresenceDrawMin)
+	SHADER_PARAMETER(float, CreasePresenceDrawMax)
 	SHADER_PARAMETER(float, DistinctSampleScale)
 	SHADER_PARAMETER(float, SaturatedSampleCount)
 	SHADER_PARAMETER(uint32, DebugView)
@@ -132,6 +145,7 @@ public:
 		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSubstrateGlobalUniformParameters, Substrate)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineEdgeCheckParameters, EdgeCheck)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineCompositeParameters, Composite)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, DrawnEdge)
 		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Input)
 		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Output)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, InputSceneColorTexture)
@@ -161,6 +175,7 @@ public:
 		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSubstrateGlobalUniformParameters, Substrate)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineEdgeCheckParameters, EdgeCheck)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineCompositeParameters, Composite)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, DrawnEdge)
 		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Input)
 		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Output)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, RWForegroundDeviceZ)
@@ -191,10 +206,39 @@ public:
 		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSubstrateGlobalUniformParameters, Substrate)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineEdgeCheckParameters, EdgeCheck)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineCompositeParameters, Composite)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, DrawnEdge)
 		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Input)
 		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Output)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, InputSceneColorTexture)
 		RENDER_TARGET_BINDING_SLOTS()
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+// The edge pass (ThinOutlineEdge.usf): reconstructs the edge each rendering pixel draws from the records, once per
+// rendering pixel, into the DrawnEdge texture the composites read. On the listed rendering tiles (indirect), or on every
+// tile of the view.
+class FThinOutlineEdgeCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FThinOutlineEdgeCS);
+	SHADER_USE_PARAMETER_STRUCT(FThinOutlineEdgeCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSceneTextureUniformParameters, SceneTexturesStruct)
+		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSubstrateGlobalUniformParameters, Substrate)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineEdgeCheckParameters, EdgeCheck)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineCompositeParameters, Composite)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TileList)
+		SHADER_PARAMETER(uint32, bUseTileList)
+		SHADER_PARAMETER(uint32, TileCountX)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWDrawnEdge)
+		RDG_BUFFER_ACCESS(TileIndirectArgs, ERHIAccess::IndirectArgs)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -287,6 +331,7 @@ public:
 		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSubstrateGlobalUniformParameters, Substrate)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineEdgeCheckParameters, EdgeCheck)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FThinOutlineCompositeParameters, Composite)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, DrawnEdge)
 		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Input)
 		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Output)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TileList)

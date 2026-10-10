@@ -60,6 +60,19 @@ uint bSymmetricDepthMeasure;
 float CreaseRidgeThreshold;
 float CreaseValleyThreshold;
 float CreaseScale;
+// r.ThinOutline.Crease.SpikeFilter: the crease checks skip a one-pixel spike of the normal field, a pixel whose normal
+// differs from both of its neighbours along the axis while those two agree with each other (|cross| of their normals
+// below CreaseSpikeThreshold) and lie on one plane (the far one's sample within CreaseSpikePlaneTolerance × depth of the
+// near one's plane: a groove's two sides do, a step's two risers do not). See DetectEdges.
+uint bCreaseSpikeFilter;
+float CreaseSpikeThreshold;
+float CreaseSpikePlaneTolerance;
+
+// Whether the spike filter is compiled in (it loads the normal of a pixel two steps away where a crease check fired):
+// the record pass's permutation (r.ThinOutline.Crease.SpikeFilter) and the composites' debug views.
+#ifndef CREASE_SPIKE_FILTER
+#define CREASE_SPIKE_FILTER 0
+#endif
 
 // Linear depth used for pixels on the far plane (sky), so they act as the farthest background.
 #define THIN_OUTLINE_FAR_DEPTH 1.0e20
@@ -77,6 +90,29 @@ float CreaseScale;
 
 // Ordered so that (Index ^ 1) is the opposite neighbour: left, right, top, bottom.
 static const int2 NeighbourOffsets[4] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
+
+//------------------------------------------------------- VELOCITY
+
+float2 ViewportPosToScreenPos(int2 ViewportPos)
+{
+	return (float2(ViewportPos) + 0.5) * View.ViewSizeAndInvSize.zw * float2(2.0, -2.0) + float2(-1.0, 1.0);
+}
+
+// Screen velocity (and device Z velocity) of a pixel that did not draw velocity: camera motion only.
+float3 ComputeStaticVelocity(float2 ScreenPos, float DeviceZ)
+{
+	const float3 PosN = float3(ScreenPos, DeviceZ);
+	const float4 PrevClip = mul(float4(PosN, 1.0), View.ClipToPrevClip);
+	return PosN - PrevClip.xyz / PrevClip.w;
+}
+
+float3 GetPixelVelocity(int2 PixelPos, float DeviceZ)
+{
+	const float4 EncodedVelocity = SceneTexturesStruct.GBufferVelocityTexture.Load(int3(PixelPos, 0));
+	return EncodedVelocity.x > 0.0
+		? DecodeVelocityFromTexture(EncodedVelocity)
+		: ComputeStaticVelocity(ViewportPosToScreenPos(PixelPos - int2(View.ViewRectMin.xy)), DeviceZ);
+}
 
 //------------------------------------------------------- EDGE CHECKS
 
@@ -136,11 +172,9 @@ FThinOutlineSample LoadDepthSample(int2 PixelPos)
 }
 
 // Depth, world position and normal of a pixel (clamped to the view rect).
-FThinOutlineSample LoadOutlineSample(int2 PixelPos)
+// Adds the normal of the pixel (clamped to the view rect) to its depth sample.
+void LoadSampleNormal(int2 ClampedPos, inout FThinOutlineSample Sample)
 {
-	const int2 ClampedPos = ClampToViewRect(PixelPos);
-	FThinOutlineSample Sample = LoadDepthSample(ClampedPos);
-
 #if SUBSTRATE_GBUFFER_FORMAT == 1
 	const FSubstrateTopLayerData TopLayerData = SubstrateUnpackTopLayerData(Substrate.TopLayerTexture.Load(uint3(ClampedPos, 0)));
 	Sample.WorldNormal = TopLayerData.WorldNormal;
@@ -152,11 +186,19 @@ FThinOutlineSample LoadOutlineSample(int2 PixelPos)
 #endif
 
 	Sample.bHasNormal = Sample.bHasNormal && !Sample.bIsSky && dot(Sample.WorldNormal, Sample.WorldNormal) > 0.25;
+}
+
+FThinOutlineSample LoadOutlineSample(int2 PixelPos)
+{
+	const int2 ClampedPos = ClampToViewRect(PixelPos);
+	FThinOutlineSample Sample = LoadDepthSample(ClampedPos);
+	LoadSampleNormal(ClampedPos, Sample);
 	return Sample;
 }
 
 // Loads the target pixel and its axial neighbours (clamped to the view rect) in NeighbourOffsets order, and the depth
-// samples of the pixels two steps away (the pixel beyond each neighbour).
+// samples of the pixels two steps away (the pixel beyond each neighbour; the spike filter adds a normal where it needs
+// one, see DetectEdges).
 void LoadOutlineNeighbourhood(
 	int2 PixelPos,
 	out FThinOutlineSample Center,
@@ -226,6 +268,17 @@ float GetEdgeStrength(float Measure, float Threshold, float Scale)
 	return Measure > Threshold ? saturate((Measure - Threshold) * Scale) : 0.0;
 }
 
+// Whether two pixels are one surface for the spike filter: their normals agree within its threshold (the sine of the
+// angle between them) and B's sample lies on A's plane within its plane tolerance (relative to A's depth). Without the
+// plane test a thin step top between two risers facing the same way (a wall top in front of the next wall) counted as
+// a spike on the frames when the jitter put it in one pixel row, and lost its crease.
+bool IsSameSurfaceForSpike(FThinOutlineSample A, FThinOutlineSample B)
+{
+	return A.bHasNormal && B.bHasNormal
+		&& length(cross(A.WorldNormal, B.WorldNormal)) < CreaseSpikeThreshold
+		&& abs(dot(B.TranslatedWorldPosition - A.TranslatedWorldPosition, A.WorldNormal)) <= CreaseSpikePlaneTolerance * A.Depth;
+}
+
 // Silhouette strength of the background pixel's check of C toward N (O on the other side of C, F beyond N): C must be
 // farther than N. A sky pixel next to geometry is always a silhouette.
 float GetSilhouetteStrength(FThinOutlineSample C, FThinOutlineSample N, FThinOutlineSample O, FThinOutlineSample F)
@@ -257,6 +310,9 @@ struct FThinOutlineEdges
 	float CreaseMeasure[4];
 	// Whether the crease of each direction is a ridge (convex) rather than a valley.
 	bool bRidge[4];
+	// Directions (bit i for NeighbourOffsets[i]) whose crease check was skipped as a one-pixel normal spike
+	// (CREASE_SPIKE_FILTER; debug view 9).
+	uint SpikeMask;
 };
 
 // Crease measure of the check of C toward N, O being the pixel on the other side of C (its normal only counts when it is
@@ -269,11 +325,12 @@ float GetCreaseCheckMeasure(FThinOutlineSample C, FThinOutlineSample N, FThinOut
 	return GetCreaseEdgeMeasure(C.WorldNormal, N.WorldNormal, OppositeNormal);
 }
 
-// See LoadOutlineNeighbourhood for the arguments.
-FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neighbours[4], FThinOutlineSample FarNeighbours[4])
+// See LoadOutlineNeighbourhood for the arguments; PixelPos is the target's (the spike filter loads from it).
+FThinOutlineEdges DetectEdges(int2 PixelPos, FThinOutlineSample Center, FThinOutlineSample Neighbours[4], FThinOutlineSample FarNeighbours[4])
 {
 	FThinOutlineEdges Edges;
 	Edges.MaxSilhouette = 0.0;
+	Edges.SpikeMask = 0;
 
 	// The depth edge measure toward each neighbour, computed once: the silhouette check toward it, the crease check's
 	// same-surface test toward it, and the opposite direction's test of its opposite pixel all use the same one.
@@ -329,6 +386,52 @@ FThinOutlineEdges DetectEdges(FThinOutlineSample Center, FThinOutlineSample Neig
 			}
 		}
 	}
+
+#if CREASE_SPIKE_FILTER
+	// r.ThinOutline.Crease.SpikeFilter: a one-pixel spike of the normal field is not a crease (a groove wall thinner than
+	// a pixel, hit by the jittered sample on some frames: a few pixels pop on every frame of a distant surface, and the
+	// records they fed drew dots that blinked or stayed). The target is a spike when it has a crease toward both of its
+	// neighbours along an axis and those two are one surface (IsSameSurfaceForSpike: normals agreeing, one plane); a
+	// neighbour is a spike when the target has a crease toward it and the target and the pixel beyond the neighbour are
+	// one surface. Both checks of a spike target and the check toward a spike neighbour are skipped, and their measure
+	// cleared, so the crease is not found there either. The normal of the pixel beyond a neighbour is loaded only where
+	// the target has a crease toward that neighbour and is not a spike itself: a few percent of the pixels (loading all
+	// four up front for every pixel cost 0.007 ms at 73%, about 7% of the plugin's time). A real ridge one pixel wide on
+	// a flat surface (a thin wall seen edge-on at a distance) is dropped with the spikes; a step is kept.
+	BRANCH
+	if (bCreaseSpikeFilter != 0)
+	{
+		UNROLL
+		for (uint Axis = 0; Axis < 2; ++Axis)
+		{
+			const uint First = 2 * Axis;
+			const uint Second = First + 1;
+			const bool bCreaseFirst = Edges.CreaseMeasure[First] > (Edges.bRidge[First] ? CreaseRidgeThreshold : CreaseValleyThreshold);
+			const bool bCreaseSecond = Edges.CreaseMeasure[Second] > (Edges.bRidge[Second] ? CreaseRidgeThreshold : CreaseValleyThreshold);
+			const bool bCenterSpike = bCreaseFirst && bCreaseSecond && IsSameSurfaceForSpike(Neighbours[First], Neighbours[Second]);
+
+			UNROLL
+			for (uint Index = First; Index <= Second; ++Index)
+			{
+				const bool bCrease = Index == First ? bCreaseFirst : bCreaseSecond;
+				bool bNeighbourSpike = false;
+				BRANCH
+				if (bCrease && !bCenterSpike)
+				{
+					FThinOutlineSample Far = FarNeighbours[Index];
+					LoadSampleNormal(ClampToViewRect(PixelPos + 2 * NeighbourOffsets[Index]), Far);
+					bNeighbourSpike = IsSameSurfaceForSpike(Center, Far);
+				}
+				if (bCenterSpike || bNeighbourSpike)
+				{
+					Edges.Crease[Index] = 0.0;
+					Edges.CreaseMeasure[Index] = 0.0;
+					Edges.SpikeMask |= 1u << Index;
+				}
+			}
+		}
+	}
+#endif
 
 	return Edges;
 }

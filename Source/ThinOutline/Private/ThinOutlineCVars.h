@@ -36,13 +36,22 @@ extern TAutoConsoleVariable<float> CVarThinOutlineCreaseValleyThreshold;
 extern TAutoConsoleVariable<float> CVarThinOutlineCreaseScale;
 extern TAutoConsoleVariable<float> CVarThinOutlineCreaseThickness;
 extern TAutoConsoleVariable<float> CVarThinOutlineCreaseHistoryDepthThreshold;
-extern TAutoConsoleVariable<int32> CVarThinOutlineCreaseHistoryCreaseTest;
 extern TAutoConsoleVariable<float> CVarThinOutlineCreaseHistoryCreaseTestThreshold;
-extern TAutoConsoleVariable<int32> CVarThinOutlineCreaseHistoryFramesWithoutCrease;
+extern TAutoConsoleVariable<int32> CVarThinOutlineCreasePresence;
+extern TAutoConsoleVariable<float> CVarThinOutlineCreasePresenceFrames;
+extern TAutoConsoleVariable<float> CVarThinOutlineCreasePresenceDrawMin;
+extern TAutoConsoleVariable<float> CVarThinOutlineCreasePresenceDrawMax;
+extern TAutoConsoleVariable<float> CVarThinOutlineCreasePresenceDropLevel;
+extern TAutoConsoleVariable<int32> CVarThinOutlineCreaseSpikeFilter;
+extern TAutoConsoleVariable<float> CVarThinOutlineCreaseSpikeThreshold;
+extern TAutoConsoleVariable<float> CVarThinOutlineCreaseSpikePlaneTolerance;
 extern TAutoConsoleVariable<int32> CVarThinOutlineSpatialFilter;
 extern TAutoConsoleVariable<float> CVarThinOutlineSpatialFilterSigma;
 extern TAutoConsoleVariable<int32> CVarThinOutlineAxisBlend;
 extern TAutoConsoleVariable<float> CVarThinOutlineAxisBlendScale;
+extern TAutoConsoleVariable<int32> CVarThinOutlineDenseEdgeSuppression;
+extern TAutoConsoleVariable<float> CVarThinOutlineDenseEdgeTolerance;
+extern TAutoConsoleVariable<int32> CVarThinOutlineIsolatedEdgeSuppression;
 
 // Temporal edge estimator (per-pixel OLS edge records)
 extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorDecay;

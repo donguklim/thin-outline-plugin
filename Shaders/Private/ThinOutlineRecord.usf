@@ -20,8 +20,9 @@
 	velocity, except on the frames when the pixel samples the background next to the contour: it then takes the velocity
 	of the foreground neighbour (see FindHistoryForeground), since the records it holds from the other frames belong to
 	the foreground. Each history tap's record feeds the reprojected record of its own type.
-	Crease records are kept while their depth matches the pixel's, and (CREASE_HISTORY_TEST) until a few frames pass
-	without a crease found at the pixel along their axis (see UpdateCreaseMissCount).
+	Crease records are kept while their depth matches the pixel's, and (CREASE_PRESENCE) while their presence, the
+	fraction of recent frames with a crease found at the pixel along their axis, stays above the drop level (see
+	UpdateCreasePresence).
 	Silhouette records are kept while their foreground depth matches the pixel's or its foreground neighbour's, and while
 	the background of the contour is still within two pixels toward the record's background side (see
 	HasBackgroundInReach): when the contour slides over a curved surface, a record that moved with the surface ends up
@@ -79,39 +80,20 @@ float FadeLimit;
 // history test at once, and a silhouette sample takes its crease record over at once, as without fades, so that records
 // do not trail moving edges and contours that move in are not held back.
 float FadeMaxSpeed;
-// Keep level of the crease history test (CREASE_HISTORY_TEST): the crease thresholds scaled by
-// r.ThinOutline.Crease.HistoryCreaseTestThreshold; and the frames without a crease after which a crease record is
-// dropped (r.ThinOutline.Crease.HistoryFramesWithoutCrease, or the jitter sequence length).
+// Keep level of the crease presence (CREASE_PRESENCE): the crease thresholds scaled by
+// r.ThinOutline.Crease.HistoryCreaseTestThreshold; the rate 1 / r.ThinOutline.Crease.PresenceFrames at which the
+// presence follows whether a crease was found this frame; and the presence below which a crease record is dropped
+// (r.ThinOutline.Crease.PresenceDropLevel).
 float CreaseHistoryKeepRidgeThreshold;
 float CreaseHistoryKeepValleyThreshold;
-float CreaseHistoryMissLimit;
+float CreasePresenceRate;
+float CreasePresenceDropLevel;
 uint bHistoryValid;
 // Bit 0: drop records outside the sampling range. Bit 1: bilinear history instead of the nearest history pixel.
 uint HistoryReprojectionMode;
 
 #define HISTORY_RANGE_DROP 1
 #define HISTORY_BILINEAR 2
-
-float2 ViewportPosToScreenPos(int2 ViewportPos)
-{
-	return (float2(ViewportPos) + 0.5) * View.ViewSizeAndInvSize.zw * float2(2.0, -2.0) + float2(-1.0, 1.0);
-}
-
-// Screen velocity (and device Z velocity) of a pixel that did not draw velocity: camera motion only.
-float3 ComputeStaticVelocity(float2 ScreenPos, float DeviceZ)
-{
-	const float3 PosN = float3(ScreenPos, DeviceZ);
-	const float4 PrevClip = mul(float4(PosN, 1.0), View.ClipToPrevClip);
-	return PosN - PrevClip.xyz / PrevClip.w;
-}
-
-float3 GetPixelVelocity(int2 PixelPos, float DeviceZ)
-{
-	const float4 EncodedVelocity = SceneTexturesStruct.GBufferVelocityTexture.Load(int3(PixelPos, 0));
-	return EncodedVelocity.x > 0.0
-		? DecodeVelocityFromTexture(EncodedVelocity)
-		: ComputeStaticVelocity(ViewportPosToScreenPos(PixelPos - int2(View.ViewRectMin.xy)), DeviceZ);
-}
 
 // History pixels of a point at ScreenPos that moved by ScreenVelocity (see the top of the file), with their weights and
 // this pixel's center relative to each one's center. Taps outside the view get no weight.
@@ -299,7 +281,7 @@ uint GetBackgroundInReachMask(FThinOutlineSample Center, FThinOutlineSample Neig
 }
 
 // The directions (bit i for NeighbourOffsets[i]) in which this frame's crease check of the pixel reaches the keep level
-// of the crease history test (CREASE_HISTORY_TEST): the crease measure above the ridge or valley threshold scaled by
+// of the crease presence (CREASE_PRESENCE): the crease measure above the ridge or valley threshold scaled by
 // r.ThinOutline.Crease.HistoryCreaseTestThreshold, also on frames when the pixel has a silhouette and runs no crease
 // checks.
 uint GetNearCreaseMask(FThinOutlineEdges Edges)
@@ -316,10 +298,13 @@ uint GetNearCreaseMask(FThinOutlineEdges Edges)
 	return Mask;
 }
 
-// The crease history test of one axis's reprojected crease record (CREASE_HISTORY_TEST): its count of frames since a
-// crease was last found at the pixel along the axis restarts when one is found this frame, and the record is dropped
-// when the count reaches CreaseHistoryMissLimit (r.ThinOutline.Crease.HistoryFramesWithoutCrease, 3; 1000 = in effect
-// never; 0 = a jitter cycle).
+// The crease presence of one axis's reprojected crease record (CREASE_PRESENCE): the fraction of recent frames with a
+// crease found at the pixel along the axis, an exponential average at CreasePresenceRate of "found this frame"; the
+// record is dropped when it sinks below CreasePresenceDropLevel. It replaced (2026-10-10) a count of frames without a
+// crease with a hard limit, which blinked the creases of junctions found only on some frames, while without it a
+// groove wall thinner than a pixel, hit by the jittered sample on a few frames, left a dot for seconds. The composites
+// scale a crease's strength by a ramp on the presence (r.ThinOutline.Crease.PresenceDrawMin and Max), so a record found
+// on a few frames only stays faint or invisible while its fit is kept, and a new crease fades in over a few frames.
 // The depth test cannot see a record that slid along one depth-continuous surface (a foot's crease left on the floor it
 // stood on, a junction's crease carried onto the curved wall next to it), since a crease joins two such surfaces by
 // definition. Nor copies: the history only shifts records, so on a face that widens on screen (turning toward the
@@ -327,14 +312,14 @@ uint GetNearCreaseMask(FThinOutlineEdges Edges)
 // pixel, and those near it draw. Not every frame, because a crease thinner than a pixel (a ledge seen edge-on) is only
 // found on the frames when a sample lands on it, and the pixel on either side of a crease only on the frames when its
 // own pair of pixels straddles it.
-void UpdateCreaseMissCount(inout FThinOutlineRecord Record, bool bCreaseFound)
+void UpdateCreasePresence(inout FThinOutlineRecord Record, bool bCreaseFound)
 {
 	if (Record.SampleCount <= 0.0)
 	{
 		return;
 	}
-	Record.ForegroundDepth = bCreaseFound ? 0.0 : Record.ForegroundDepth + 1.0;
-	if (Record.ForegroundDepth >= CreaseHistoryMissLimit)
+	Record.ForegroundDepth += ((bCreaseFound ? 1.0 : 0.0) - Record.ForegroundDepth) * CreasePresenceRate;
+	if (Record.ForegroundDepth < CreasePresenceDropLevel)
 	{
 		Record = GetEmptyRecord();
 	}
@@ -550,11 +535,11 @@ void ReprojectHistory(
 			{
 				const float TapDepth = HistoryDepth.Load(Texel);
 				const bool bKeep = abs(TapDepth - PrevDepth) <= CreaseTolerance;
-#if CREASE_HISTORY_TEST
-				// The frames since a crease was last found (see UpdateCreaseMissCount), merged like the other values.
-				const float4 TapMissCounts = HistorySilhouetteForeground.Load(Texel);
-				TapHorizontal.ForegroundDepth = TapMissCounts.z;
-				TapVertical.ForegroundDepth = TapMissCounts.w;
+#if CREASE_PRESENCE
+				// The crease presence (see UpdateCreasePresence), merged like the other values.
+				const float4 TapPresences = HistorySilhouetteForeground.Load(Texel);
+				TapHorizontal.ForegroundDepth = TapPresences.z;
+				TapVertical.ForegroundDepth = TapPresences.w;
 #endif
 				if (bHorizontalCrease)
 				{
@@ -601,9 +586,9 @@ void ReprojectHistory(
 	bSilhouetteVerticalFailed = RestoreFailedRecord(SilhouetteVertical, SilhouetteVerticalPassed);
 	FailedCreaseDepth = FailedCreaseWeight > 0.0 ? FailedCreaseDepthSum / FailedCreaseWeight : 0.0;
 
-#if CREASE_HISTORY_TEST
-	UpdateCreaseMissCount(CreaseHorizontal, (NearCreaseMask & 0x3u) != 0);
-	UpdateCreaseMissCount(CreaseVertical, (NearCreaseMask & 0xCu) != 0);
+#if CREASE_PRESENCE
+	UpdateCreasePresence(CreaseHorizontal, (NearCreaseMask & 0x3u) != 0);
+	UpdateCreasePresence(CreaseVertical, (NearCreaseMask & 0xCu) != 0);
 #endif
 
 	if (SilhouetteHorizontal.SampleCount > 0.0 && !HasBackgroundInReach(SilhouetteHorizontal, 0, BackgroundInReachMask))
@@ -672,7 +657,7 @@ void ReprojectHistory(
 
 // Adds this frame's samples of the two checks of one axis. The first (left or top) check's samples are kept as they
 // are, the second (right or bottom) check's samples are moved by +0.5 along the axis. ForegroundDepth: the pixel's
-// depth (silhouettes only).
+// depth (silhouettes), or the record's presence (creases, CREASE_PRESENCE).
 void AddAxisSamples(inout FThinOutlineRecord Record, float2 Sample, float FirstStrength, float SecondStrength, float ForegroundDepth)
 {
 	if (FirstStrength > 0.0)
@@ -746,7 +731,13 @@ void UpdateAxisRecord(
 	{
 		Record = CreaseRecord;
 		EdgeType = EDGE_CREASE;
+#if CREASE_PRESENCE
+		// The samples carry the record's presence, so that averaging them in leaves it as UpdateCreasePresence set it; a
+		// new record starts at the rate (found once).
+		AddAxisSamples(Record, Sample, FirstCrease, SecondCrease, CreaseRecord.SampleCount > 0.0 ? CreaseRecord.ForegroundDepth : CreasePresenceRate);
+#else
 		AddAxisSamples(Record, Sample, FirstCrease, SecondCrease, 0.0);
+#endif
 	}
 	else
 	{
@@ -774,7 +765,7 @@ void MainCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 	FThinOutlineSample FarNeighbours[4];
 	LoadOutlineNeighbourhood(PixelPos, Center, Neighbours, FarNeighbours);
 
-	const FThinOutlineEdges Edges = DetectEdges(Center, Neighbours, FarNeighbours);
+	const FThinOutlineEdges Edges = DetectEdges(PixelPos, Center, Neighbours, FarNeighbours);
 
 	FThinOutlineRecord CreaseHorizontal = GetEmptyRecord();
 	FThinOutlineRecord CreaseVertical = GetEmptyRecord();
@@ -825,21 +816,21 @@ void MainCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 	RWVerticalA[ViewportPos] = A;
 	RWVerticalB[ViewportPos] = B;
 
-	// Silhouette records: kept ratio and foreground depth. Crease records: their frame counts of the crease history test.
+	// Silhouette records: kept ratio and foreground depth. Crease records: their presence.
 	const bool bHorizontalSilhouette = HorizontalType == EDGE_SILHOUETTE && Horizontal.SampleCount > 0.0;
 	const bool bVerticalSilhouette = VerticalType == EDGE_SILHOUETTE && Vertical.SampleCount > 0.0;
-#if CREASE_HISTORY_TEST
-	const float HorizontalCreaseMisses = HorizontalType == EDGE_CREASE ? Horizontal.ForegroundDepth : 0.0;
-	const float VerticalCreaseMisses = VerticalType == EDGE_CREASE ? Vertical.ForegroundDepth : 0.0;
+#if CREASE_PRESENCE
+	const float HorizontalCreasePresence = HorizontalType == EDGE_CREASE ? Horizontal.ForegroundDepth : 0.0;
+	const float VerticalCreasePresence = VerticalType == EDGE_CREASE ? Vertical.ForegroundDepth : 0.0;
 #else
-	const float HorizontalCreaseMisses = 0.0;
-	const float VerticalCreaseMisses = 0.0;
+	const float HorizontalCreasePresence = 0.0;
+	const float VerticalCreasePresence = 0.0;
 #endif
 	RWSilhouetteForeground[ViewportPos] = float4(
 		bHorizontalSilhouette ? Horizontal.KeptRatio : 0.0,
 		bVerticalSilhouette ? Vertical.KeptRatio : 0.0,
-		bHorizontalSilhouette ? Horizontal.ForegroundDepth * THIN_OUTLINE_FOREGROUND_DEPTH_STORE_SCALE : HorizontalCreaseMisses,
-		bVerticalSilhouette ? Vertical.ForegroundDepth * THIN_OUTLINE_FOREGROUND_DEPTH_STORE_SCALE : VerticalCreaseMisses);
+		bHorizontalSilhouette ? Horizontal.ForegroundDepth * THIN_OUTLINE_FOREGROUND_DEPTH_STORE_SCALE : HorizontalCreasePresence,
+		bVerticalSilhouette ? Vertical.ForegroundDepth * THIN_OUTLINE_FOREGROUND_DEPTH_STORE_SCALE : VerticalCreasePresence);
 
 	// A crease record kept through a failed depth test belongs to the surface it was recorded on, so that surface's depth
 	// is stored with it: tested against this frame's depth next frame, it would pass and the record would be adopted by

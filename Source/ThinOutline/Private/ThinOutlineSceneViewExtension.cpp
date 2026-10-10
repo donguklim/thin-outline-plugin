@@ -49,6 +49,8 @@ namespace ThinOutline
 		FRDGTextureRef Textures[EThinOutlineHistoryTexture::Num] = {};
 		/** r.ThinOutline.TileClassification: the records' positions per 8x8 group, at 2x2 blocks (FThinOutlineRecordMaskCS). */
 		FRDGTextureRef RecordMask = nullptr;
+		/** The edge each rendering pixel draws (FThinOutlineEdgeCS). */
+		FRDGTextureRef DrawnEdge = nullptr;
 	};
 
 	/** Render graph blackboard entry: the records the BeforeDOF pass leaves for the MotionBlur after-pass of the same graph. */
@@ -66,6 +68,9 @@ namespace ThinOutline
 		EdgeCheck.CreaseRidgeThreshold   = Settings.CreaseRidgeThreshold;
 		EdgeCheck.CreaseValleyThreshold  = Settings.CreaseValleyThreshold;
 		EdgeCheck.CreaseScale            = Settings.CreaseScale;
+		EdgeCheck.bCreaseSpikeFilter     = Settings.bCreaseSpikeFilter ? 1 : 0;
+		EdgeCheck.CreaseSpikeThreshold   = Settings.CreaseSpikeThreshold;
+		EdgeCheck.CreaseSpikePlaneTolerance = Settings.CreaseSpikePlaneTolerance;
 		return EdgeCheck;
 	}
 
@@ -101,6 +106,12 @@ namespace ThinOutline
 		Parameters.SpatialFilterSigma          = Settings.SpatialFilterSigma;
 		Parameters.bAxisBlend                  = Settings.bAxisBlend ? 1 : 0;
 		Parameters.AxisBlendScale              = Settings.AxisBlendScale;
+		Parameters.DenseEdgeSuppression        = static_cast<uint32>(Settings.DenseEdgeSuppression);
+		Parameters.DenseEdgeTolerance          = Settings.DenseEdgeTolerance;
+		Parameters.bIsolatedEdgeSuppression    = Settings.bIsolatedEdgeSuppression ? 1 : 0;
+		Parameters.bCreasePresence             = Settings.bCreasePresence ? 1 : 0;
+		Parameters.CreasePresenceDrawMin       = Settings.CreasePresenceDrawMin;
+		Parameters.CreasePresenceDrawMax       = Settings.CreasePresenceDrawMax;
 		Parameters.DistinctSampleScale         = FMath::Min(1.0f, Settings.EstimatorDecay * float(FMath::Max(ViewInfo.TemporalJitterSequenceLength, 1)));
 		Parameters.SaturatedSampleCount        = 1.0f / Settings.EstimatorDecay;
 		Parameters.DebugView                   = static_cast<uint32>(FMath::Max(Settings.DebugView, 0));
@@ -199,13 +210,62 @@ namespace ThinOutline
 	}
 
 	/**
+	 * The edge pass (FThinOutlineEdgeCS): the edge each rendering pixel draws, reconstructed from the records once per
+	 * rendering pixel for the composites of both modes. On the listed rendering tiles when there is a tile list, else
+	 * on every tile of the view; the texture is cleared first, so the pixels of tiles that do not run draw nothing.
+	 */
+	FRDGTextureRef AddEdgePass(
+		FRDGBuilder& GraphBuilder,
+		const FViewInfo& ViewInfo,
+		const FPostProcessMaterialInputs& Inputs,
+		const FThinOutlineRenderSettings& Settings,
+		const FRDGTextureRef (&Records)[EThinOutlineHistoryTexture::Num],
+		FIntPoint DisplaySize,
+		const FTileLists* TileLists)
+	{
+		const FIntPoint ViewSize = ViewInfo.ViewRect.Size();
+		const FIntPoint TileCount = FIntPoint::DivideAndRoundUp(ViewSize, FThinOutlineRecordMaskCS::TileSize);
+
+		FRDGTextureRef DrawnEdge = GraphBuilder.CreateTexture(
+			FRDGTextureDesc::Create2D(ViewSize, PF_A32B32G32R32F, FClearValueBinding::Transparent, TexCreate_ShaderResource | TexCreate_UAV), TEXT("ThinOutline.DrawnEdge"));
+		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(DrawnEdge), FLinearColor::Transparent);
+		FThinOutlineEdgeCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FThinOutlineEdgeCS::FParameters>();
+		PassParameters->View                   = ViewInfo.ViewUniformBuffer;
+		PassParameters->SceneTexturesStruct    = Inputs.SceneTextures.SceneTextures;
+		PassParameters->Substrate              = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
+		PassParameters->EdgeCheck              = GetEdgeCheckParameters(Settings);
+		PassParameters->Composite              = GetCompositeParameters(Settings, ViewInfo, Records, DisplaySize);
+		PassParameters->TileList               = GraphBuilder.CreateSRV(TileLists ? TileLists->TileList : GSystemTextures.GetDefaultStructuredBuffer(GraphBuilder, sizeof(uint32)));
+		PassParameters->bUseTileList           = TileLists ? 1 : 0;
+		PassParameters->TileCountX             = uint32(TileCount.X);
+		PassParameters->RWDrawnEdge            = GraphBuilder.CreateUAV(DrawnEdge);
+
+		TShaderMapRef<FThinOutlineEdgeCS> ComputeShader(GetGlobalShaderMap(ViewInfo.GetFeatureLevel()));
+		if (TileLists)
+		{
+			PassParameters->TileIndirectArgs = TileLists->DispatchArgs;
+			FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("ThinOutline.Edges(Tiles)"), ComputeShader, PassParameters, TileLists->DispatchArgs, 0);
+		}
+		else
+		{
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("ThinOutline.Edges %dx%d", TileCount.X, TileCount.Y),
+				ComputeShader,
+				PassParameters,
+				FIntVector(TileCount.X * TileCount.Y, 1, 1));
+		}
+		return DrawnEdge;
+	}
+
+	/**
 	 * Whether a composite can run on tiles, in place in the scene color through a UAV: a UAV-capable scene color whose
 	 * format supports typed UAV loads, no override output, and a view drawn per tile (debug views 1, 2 and 4 show every
 	 * pixel).
 	 */
 	bool CanCompositeTiles(const FThinOutlineRenderSettings& Settings, const FPostProcessMaterialInputs& Inputs, const FScreenPassTexture& SceneColor)
 	{
-		const bool bPerPixelDebugView = Settings.DebugView == 1 || Settings.DebugView == 2 || Settings.DebugView == 4;
+		const bool bPerPixelDebugView = Settings.DebugView == 1 || Settings.DebugView == 2 || Settings.DebugView == 4 || Settings.DebugView == 9;
 		return Settings.bTileClassification
 			&& !bPerPixelDebugView
 			&& !Inputs.OverrideOutput.IsValid()
@@ -213,11 +273,11 @@ namespace ThinOutline
 			&& UE::PixelFormat::HasCapabilities(SceneColor.Texture->Desc.Format, EPixelFormatCapabilities::TypedUAVLoad);
 	}
 
-	/** Debug views 3 and 5 show the outline alpha on black: the tiles write theirs, the rest stays cleared. */
+	/** Debug views 3, 5 and 7 show the outline alpha on black: the tiles write theirs, the rest stays cleared. */
 	FRDGTextureUAVRef CreateTileSceneColorUAV(FRDGBuilder& GraphBuilder, const FThinOutlineRenderSettings& Settings, const FScreenPassTexture& SceneColor)
 	{
 		FRDGTextureUAVRef SceneColorUAV = GraphBuilder.CreateUAV(SceneColor.Texture);
-		if (Settings.DebugView == 3 || Settings.DebugView == 5)
+		if (Settings.DebugView == 3 || Settings.DebugView == 5 || Settings.DebugView == 7)
 		{
 			AddClearUAVPass(GraphBuilder, SceneColorUAV, FLinearColor::Black);
 		}
@@ -246,6 +306,7 @@ namespace ThinOutline
 		PassParameters->Substrate           = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
 		PassParameters->EdgeCheck           = GetEdgeCheckParameters(Settings);
 		PassParameters->Composite           = GetCompositeParameters(Settings, ViewInfo, ViewRecords.Textures, DisplaySize);
+		PassParameters->DrawnEdge           = ViewRecords.DrawnEdge;
 		PassParameters->Input               = ViewportParameters;
 		PassParameters->Output              = ViewportParameters;
 		PassParameters->TileList            = GraphBuilder.CreateSRV(Lists.TileList);
@@ -332,14 +393,23 @@ void FThinOutlineSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& InV
 	Settings.FadeMaxSpeed                        = FMath::Max(0.0f, CVarThinOutlineEstimatorFadeMaxSpeed.GetValueOnGameThread());
 	Settings.SlopeStandardErrorThreshold         = FMath::Max(0.0f, CVarThinOutlineEstimatorSlopeSEThreshold.GetValueOnGameThread());
 	Settings.CreaseHistoryDepthThreshold         = FMath::Max(0.0f, CVarThinOutlineCreaseHistoryDepthThreshold.GetValueOnGameThread());
-	Settings.bCreaseHistoryCreaseTest            = CVarThinOutlineCreaseHistoryCreaseTest.GetValueOnGameThread() != 0;
 	// At most 1: a crease sample then always counts as a crease found.
 	Settings.CreaseHistoryCreaseTestThreshold    = FMath::Clamp(CVarThinOutlineCreaseHistoryCreaseTestThreshold.GetValueOnGameThread(), 0.0f, 1.0f);
-	Settings.CreaseHistoryFramesWithoutCrease    = FMath::Max(0, CVarThinOutlineCreaseHistoryFramesWithoutCrease.GetValueOnGameThread());
+	Settings.bCreasePresence                     = CVarThinOutlineCreasePresence.GetValueOnGameThread() != 0;
+	Settings.CreasePresenceFrames                = FMath::Max(1.0f, CVarThinOutlineCreasePresenceFrames.GetValueOnGameThread());
+	Settings.CreasePresenceDrawMin               = FMath::Clamp(CVarThinOutlineCreasePresenceDrawMin.GetValueOnGameThread(), 0.0f, 1.0f);
+	Settings.CreasePresenceDrawMax               = FMath::Clamp(CVarThinOutlineCreasePresenceDrawMax.GetValueOnGameThread(), 0.0f, 1.0f);
+	Settings.CreasePresenceDropLevel             = FMath::Clamp(CVarThinOutlineCreasePresenceDropLevel.GetValueOnGameThread(), 0.0f, 1.0f);
+	Settings.bCreaseSpikeFilter                  = CVarThinOutlineCreaseSpikeFilter.GetValueOnGameThread() != 0;
+	Settings.CreaseSpikeThreshold                = FMath::Max(0.0f, CVarThinOutlineCreaseSpikeThreshold.GetValueOnGameThread());
+	Settings.CreaseSpikePlaneTolerance           = FMath::Max(0.0f, CVarThinOutlineCreaseSpikePlaneTolerance.GetValueOnGameThread());
 	Settings.bSpatialFilter                      = CVarThinOutlineSpatialFilter.GetValueOnGameThread() != 0;
 	Settings.SpatialFilterSigma                  = FMath::Max(0.001f, CVarThinOutlineSpatialFilterSigma.GetValueOnGameThread());
 	Settings.bAxisBlend                          = CVarThinOutlineAxisBlend.GetValueOnGameThread() != 0;
 	Settings.AxisBlendScale                      = FMath::Max(0.001f, CVarThinOutlineAxisBlendScale.GetValueOnGameThread());
+	Settings.DenseEdgeSuppression                = FMath::Clamp(CVarThinOutlineDenseEdgeSuppression.GetValueOnGameThread(), 0, 2);
+	Settings.DenseEdgeTolerance                  = FMath::Max(0.0f, CVarThinOutlineDenseEdgeTolerance.GetValueOnGameThread());
+	Settings.bIsolatedEdgeSuppression            = CVarThinOutlineIsolatedEdgeSuppression.GetValueOnGameThread() != 0;
 	Settings.SilhouetteHistoryDepthThreshold     = FMath::Max(0.0f, CVarThinOutlineSilhouetteHistoryDepthThreshold.GetValueOnGameThread());
 	Settings.HistoryReprojection                 = FMath::Clamp(CVarThinOutlineEstimatorHistoryReprojection.GetValueOnGameThread(), 0, 3);
 	Settings.DebugView                           = CVarThinOutlineDebugView.GetValueOnGameThread();
@@ -495,16 +565,16 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->FadeMaxSpeed                        = Settings.FadeMaxSpeed;
 		PassParameters->CreaseHistoryKeepRidgeThreshold     = Settings.CreaseHistoryCreaseTestThreshold * Settings.CreaseRidgeThreshold;
 		PassParameters->CreaseHistoryKeepValleyThreshold    = Settings.CreaseHistoryCreaseTestThreshold * Settings.CreaseValleyThreshold;
-		PassParameters->CreaseHistoryMissLimit              = float(Settings.CreaseHistoryFramesWithoutCrease > 0
-			? Settings.CreaseHistoryFramesWithoutCrease
-			: FMath::Max(ViewInfo.TemporalJitterSequenceLength, 1));
+		PassParameters->CreasePresenceRate                  = 1.0f / Settings.CreasePresenceFrames;
+		PassParameters->CreasePresenceDropLevel             = Settings.CreasePresenceDropLevel;
 		PassParameters->bHistoryValid                       = bHistoryValid ? 1 : 0;
 		PassParameters->HistoryReprojectionMode             = static_cast<uint32>(Settings.HistoryReprojection);
 
 		FThinOutlineRecordCS::FPermutationDomain PermutationVector;
 		const bool bViewAngleTest = Settings.SilhouetteHistoryViewAngle > 0.0f;
 		PermutationVector.Set<FThinOutlineRecordCS::FBackgroundDepthStepDim>(Settings.bSilhouetteHistoryBackgroundDepthStep);
-		PermutationVector.Set<FThinOutlineRecordCS::FCreaseHistoryTestDim>(Settings.bCreaseHistoryCreaseTest);
+		PermutationVector.Set<FThinOutlineRecordCS::FCreasePresenceDim>(Settings.bCreasePresence);
+		PermutationVector.Set<FThinOutlineRecordCS::FCreaseSpikeFilterDim>(Settings.bCreaseSpikeFilter);
 		PermutationVector.Set<FThinOutlineRecordCS::FViewAngleTestDim>(bViewAngleTest);
 		PermutationVector.Set<FThinOutlineRecordCS::FSurfaceTurnDim>(bViewAngleTest && Settings.bSilhouetteHistorySurfaceTurn);
 		TShaderMapRef<FThinOutlineRecordCS> ComputeShader(GetGlobalShaderMap(View.GetFeatureLevel()), PermutationVector);
@@ -520,6 +590,21 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 	// r.ThinOutline.TileClassification: where this frame's records are, for the composites' tile lists and for the next
 	// frame's history fetch.
 	FRDGTextureRef RecordMask = Settings.bTileClassification ? ThinOutline::AddRecordMaskPass(GraphBuilder, ViewInfo, Records) : nullptr;
+
+	// Display pixels are the output pixels of the temporal upscaler; without one, temporal AA runs at rendering resolution.
+	const FIntPoint DisplaySize = View.PrimaryScreenPercentageMethod == EPrimaryScreenPercentageMethod::TemporalUpscale
+		? ViewInfo.GetSecondaryViewRectSize()
+		: ViewSize;
+
+	// The edge each rendering pixel draws, on the rendering tiles with records within reach (the list also serves
+	// mode 0's composite and overwrite).
+	ThinOutline::FTileLists TileLists;
+	const bool bRenderTiles = RecordMask != nullptr;
+	if (bRenderTiles)
+	{
+		TileLists = ThinOutline::AddTileListPasses(GraphBuilder, ViewInfo, RecordMask, ViewSize);
+	}
+	FRDGTextureRef DrawnEdge = ThinOutline::AddEdgePass(GraphBuilder, ViewInfo, Inputs, Settings, Records, DisplaySize, bRenderTiles ? &TileLists : nullptr);
 
 	// Views that must not advance the view state's temporal history only read it.
 	if (History && !ViewInfo.bStatePrevViewInfoIsReadOnly)
@@ -549,13 +634,9 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 			ViewRecords.Textures[Index] = Records[Index];
 		}
 		ViewRecords.RecordMask = RecordMask;
+		ViewRecords.DrawnEdge = DrawnEdge;
 		return Inputs.ReturnUntouchedSceneColorForPostProcessing(GraphBuilder);
 	}
-
-	// Display pixels are the output pixels of the temporal upscaler; without one, temporal AA runs at rendering resolution.
-	const FIntPoint DisplaySize = View.PrimaryScreenPercentageMethod == EPrimaryScreenPercentageMethod::TemporalUpscale
-		? ViewInfo.GetSecondaryViewRectSize()
-		: ViewSize;
 
 	// Depth and encoded velocity of the foreground of the pixels painted with a silhouette.
 	const FRDGTextureDesc ForegroundDeviceZDesc = FRDGTextureDesc::Create2D(ViewSize, PF_R32_FLOAT, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_UAV);
@@ -566,13 +647,11 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 	// Edge reconstruction and composite. With r.ThinOutline.TileClassification, only on the rendering tiles that have
 	// records within reach, in place in the scene color; the overwrite then draws those tiles only (every pixel of a
 	// listed tile gets its foreground values, the other tiles are never read).
-	const bool bTileClassification = RecordMask && ThinOutline::CanCompositeTiles(Settings, Inputs, SceneColor);
+	const bool bTileClassification = bRenderTiles && ThinOutline::CanCompositeTiles(Settings, Inputs, SceneColor);
 	FScreenPassTexture Output;
-	ThinOutline::FTileLists TileLists;
 
 	if (bTileClassification)
 	{
-		TileLists = ThinOutline::AddTileListPasses(GraphBuilder, ViewInfo, RecordMask, ViewSize);
 		const FScreenPassTextureViewportParameters ViewportParameters = GetScreenPassTextureViewportParameters(FScreenPassTextureViewport(SceneColor));
 
 		FThinOutlineCompositeCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FThinOutlineCompositeCS::FParameters>();
@@ -581,6 +660,7 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->Substrate            = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
 		PassParameters->EdgeCheck            = EdgeCheck;
 		PassParameters->Composite            = ThinOutline::GetCompositeParameters(Settings, ViewInfo, Records, DisplaySize);
+		PassParameters->DrawnEdge            = DrawnEdge;
 		PassParameters->Input                = ViewportParameters;
 		PassParameters->Output               = ViewportParameters;
 		PassParameters->RWForegroundDeviceZ  = GraphBuilder.CreateUAV(ForegroundDeviceZ);
@@ -617,6 +697,7 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->Substrate                   = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
 		PassParameters->EdgeCheck                   = EdgeCheck;
 		PassParameters->Composite                   = ThinOutline::GetCompositeParameters(Settings, ViewInfo, Records, DisplaySize);
+		PassParameters->DrawnEdge                   = DrawnEdge;
 		PassParameters->Input                       = GetScreenPassTextureViewportParameters(InputViewport);
 		PassParameters->Output                      = GetScreenPassTextureViewportParameters(OutputViewport);
 		PassParameters->InputSceneColorTexture      = SceneColor.Texture;
@@ -771,6 +852,7 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddAfterUpscalerPass_RenderTh
 	PassParameters->Substrate              = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
 	PassParameters->EdgeCheck              = ThinOutline::GetEdgeCheckParameters(Settings);
 	PassParameters->Composite              = ThinOutline::GetCompositeParameters(Settings, ViewInfo, ViewRecords->Textures, DisplaySize);
+	PassParameters->DrawnEdge              = ViewRecords->DrawnEdge;
 	PassParameters->Input                  = GetScreenPassTextureViewportParameters(InputViewport);
 	PassParameters->Output                 = GetScreenPassTextureViewportParameters(OutputViewport);
 	PassParameters->InputSceneColorTexture = SceneColor.Texture;

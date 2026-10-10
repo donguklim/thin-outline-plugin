@@ -6,6 +6,7 @@ IMPLEMENT_GLOBAL_SHADER(FThinOutlineRecordCS, "/Plugin/ThinOutline/Private/ThinO
 IMPLEMENT_GLOBAL_SHADER(FThinOutlinePS, "/Plugin/ThinOutline/Private/ThinOutline.usf", "MainPS", SF_Pixel);
 IMPLEMENT_GLOBAL_SHADER(FThinOutlineAfterUpscalerPS, "/Plugin/ThinOutline/Private/ThinOutline.usf", "AfterUpscalerPS", SF_Pixel);
 IMPLEMENT_GLOBAL_SHADER(FThinOutlineAfterUpscalerCS, "/Plugin/ThinOutline/Private/ThinOutline.usf", "AfterUpscalerCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FThinOutlineEdgeCS, "/Plugin/ThinOutline/Private/ThinOutlineEdge.usf", "EdgeCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FThinOutlineRecordMaskCS, "/Plugin/ThinOutline/Private/ThinOutlineTileClassify.usf", "RecordMaskCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FThinOutlineTileClassifyCS, "/Plugin/ThinOutline/Private/ThinOutlineTileClassify.usf", "TileClassifyCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FThinOutlineTileSetupCS, "/Plugin/ThinOutline/Private/ThinOutlineTileClassify.usf", "TileSetupCS", SF_Compute);
