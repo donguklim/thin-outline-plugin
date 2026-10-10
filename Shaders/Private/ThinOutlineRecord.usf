@@ -36,6 +36,10 @@
 	when the presence falls below the drop level, after about three times r.ThinOutline.Presence.Frames such frames in a
 	row. A pixel whose jittered sample lands on the other surface of a depth step or sliver, or misses an edge, on one
 	frame of the jitter cycle then keeps its outline instead of losing the record and rebuilding it over several frames.
+	Velocity test (VELOCITY_TEST, r.ThinOutline.HistoryVelocityTest): neither test above can see a record of a moving
+	object left on a static surface at the same depth (a foot's creases on the floor pixel the foot just uncovered), so
+	each pixel also stores the object velocity its records moved with (the fetch's, see GetPixelVelocity), and a history
+	tap whose stored velocity disagrees with this frame's fetch is left out (see IsHistoryTapOnFetchSurface).
 =============================================================================*/
 
 #include "ThinOutlineCommon.ush"
@@ -94,6 +98,19 @@ uint HistoryReprojectionMode;
 
 #define HISTORY_RANGE_DROP 1
 #define HISTORY_BILINEAR 2
+
+#if VELOCITY_TEST
+// r.ThinOutline.HistoryVelocityTest: the object velocity (GetPixelVelocity) of the fetch that moved each pixel's records
+// last frame, in viewport pixels per frame, and this frame's.
+Texture2D<float2> HistoryVelocity;
+RWTexture2D<float2> RWVelocity;
+// Whether the history holds velocities (not on the first frame after the test is turned on): the test runs only then.
+uint bHistoryVelocityValid;
+// Allowed difference between a tap's object velocity and the fetch's, in viewport pixels per frame, plus this fraction
+// of the fetch's object speed (a surface moving on its own may have accelerated since last frame).
+float HistoryVelocityTolerance;
+float HistoryVelocityRelativeTolerance;
+#endif
 
 // History pixels of a point at ScreenPos that moved by ScreenVelocity (see the top of the file), with their weights and
 // this pixel's center relative to each one's center. Taps outside the view get no weight.
@@ -441,6 +458,26 @@ bool HasViewTurnedOffContour(FThinOutlineRecord Record, bool bVerticalAxis, int2
 #endif
 }
 
+#if VELOCITY_TEST
+// Whether a history tap moved with the surface this pixel's history fetch follows (r.ThinOutline.HistoryVelocityTest):
+// the tap's object velocity, stored when it moved last frame, agrees with the fetch's this frame within the tolerance.
+// The camera's share of the motion is left out of both (GetPixelVelocity), so a camera that speeds up, stops or turns
+// fails no tap of static geometry; what remains is the surfaces' own motion. A tap that fails is left out of the
+// reprojected record instead of being kept and faded like a failed depth test: the jitter cannot fail this test, and
+// the footprint it catches (the records of a foot on the floor pixel the foot just uncovered, at the floor's depth) is
+// exactly what a kept record would draw while it fades.
+// The tolerance grows with the fetch's own speed: a surface moving on its own may have accelerated since last frame,
+// while a static pixel (the floor under the foot) allows the base tolerance only.
+// (A second form, moving each tap on by its own motion and requiring it to still overlap the pixel, was tried on
+// 2026-10-11 and removed: the same test with the tap's bilinear offset folded in, looser at equal tolerance.)
+bool IsHistoryTapOnFetchSurface(float2 TapObjectVelocity, float2 FetchObjectVelocity)
+{
+	const float2 Difference = TapObjectVelocity - FetchObjectVelocity;
+	const float Tolerance = HistoryVelocityTolerance + HistoryVelocityRelativeTolerance * length(FetchObjectVelocity);
+	return dot(Difference, Difference) <= Tolerance * Tolerance;
+}
+#endif
+
 // A history tap that fails its depth test is still merged, at this fraction of its weight: next to a tap that passes it
 // changes nothing, and alone it keeps the record, which then fades (UpdateAxisRecord) instead of being dropped.
 #define FAILED_TAP_WEIGHT 1.0e-3
@@ -460,7 +497,7 @@ bool RestoreFailedRecord(inout FThinOutlineRecord Record, float PassedWeight)
 // Fetches the previous frame's records with the velocity of the history foreground (see FindHistoryForeground), moved
 // into this pixel's local coordinates, and applies the history tests. A record that fails them is kept and reported
 // as failed (see the top of the file); the view-angle test and the range drop still drop it, and the presence sinks
-// (UpdateAxisRecord).
+// (UpdateAxisRecord). FetchObjectVelocity: the object velocity of that fetch (VELOCITY_TEST; 0 otherwise).
 void ReprojectHistory(
 	int2 ViewportPos,
 	int2 PixelPos,
@@ -477,7 +514,8 @@ void ReprojectHistory(
 	out bool bSilhouetteHorizontalFailed,
 	out bool bSilhouetteVerticalFailed,
 	out float FailedCreaseDepth,
-	out bool bMoving)
+	out bool bMoving,
+	out float2 FetchObjectVelocity)
 {
 	CreaseHorizontal = GetEmptyRecord();
 	CreaseVertical = GetEmptyRecord();
@@ -489,6 +527,7 @@ void ReprojectHistory(
 	bSilhouetteVerticalFailed = false;
 	FailedCreaseDepth = 0.0;
 	bMoving = false;
+	FetchObjectVelocity = 0.0;
 
 	// Sky has no surface to keep records for, unless it is the background next to a foreground this frame.
 	if (Center.bIsSky && !Foreground.bFound)
@@ -496,7 +535,11 @@ void ReprojectHistory(
 		return;
 	}
 
+#if VELOCITY_TEST
+	const float3 Velocity = GetPixelVelocity(Foreground.PixelPos, Foreground.DeviceZ, FetchObjectVelocity);
+#else
 	const float3 Velocity = GetPixelVelocity(Foreground.PixelPos, Foreground.DeviceZ);
+#endif
 	const float2 ScreenPos = ViewportPosToScreenPos(ViewportPos);
 	const FThinOutlineHistoryTaps Taps = GetHistoryTaps(ScreenPos, Velocity.xy);
 
@@ -545,9 +588,23 @@ void ReprojectHistory(
 			uint VerticalType;
 			LoadHistoryRecords(Texel, TapHorizontal, HorizontalType, TapVertical, VerticalType);
 
+			// r.ThinOutline.HistoryVelocityTest: a tap that did not move with the fetch's surface is left out (both types).
+			float TapWeight = Taps.Weights[Index];
+#if VELOCITY_TEST
+			BRANCH
+			if (bHistoryVelocityValid != 0)
+			{
+				const float2 TapObjectVelocity = HistoryVelocity.Load(Texel);
+				if (!IsHistoryTapOnFetchSurface(TapObjectVelocity, FetchObjectVelocity))
+				{
+					TapWeight = 0.0;
+				}
+			}
+#endif
+
 			// Sky has no surface to keep a crease record for.
-			const bool bHorizontalCrease = !Center.bIsSky && HorizontalType == EDGE_CREASE && TapHorizontal.SampleCount > 0.0;
-			const bool bVerticalCrease = !Center.bIsSky && VerticalType == EDGE_CREASE && TapVertical.SampleCount > 0.0;
+			const bool bHorizontalCrease = TapWeight > 0.0 && !Center.bIsSky && HorizontalType == EDGE_CREASE && TapHorizontal.SampleCount > 0.0;
+			const bool bVerticalCrease = TapWeight > 0.0 && !Center.bIsSky && VerticalType == EDGE_CREASE && TapVertical.SampleCount > 0.0;
 
 			BRANCH
 			if (bHorizontalCrease || bVerticalCrease)
@@ -556,20 +613,20 @@ void ReprojectHistory(
 				const bool bKeep = abs(TapDepth - PrevDepth) <= CreaseTolerance;
 				if (bHorizontalCrease)
 				{
-					AddHistoryRecord(CreaseHorizontal, TapHorizontal, Taps.Offsets[Index].xy, Taps.Weights[Index] * (bKeep ? 1.0 : FAILED_TAP_WEIGHT));
-					CreaseHorizontalPassed += bKeep ? Taps.Weights[Index] : 0.0;
+					AddHistoryRecord(CreaseHorizontal, TapHorizontal, Taps.Offsets[Index].xy, TapWeight * (bKeep ? 1.0 : FAILED_TAP_WEIGHT));
+					CreaseHorizontalPassed += bKeep ? TapWeight : 0.0;
 				}
 				if (bVerticalCrease)
 				{
-					AddHistoryRecord(CreaseVertical, TapVertical, Taps.Offsets[Index].yx, Taps.Weights[Index] * (bKeep ? 1.0 : FAILED_TAP_WEIGHT));
-					CreaseVerticalPassed += bKeep ? Taps.Weights[Index] : 0.0;
+					AddHistoryRecord(CreaseVertical, TapVertical, Taps.Offsets[Index].yx, TapWeight * (bKeep ? 1.0 : FAILED_TAP_WEIGHT));
+					CreaseVerticalPassed += bKeep ? TapWeight : 0.0;
 				}
-				FailedCreaseDepthSum += bKeep ? 0.0 : TapDepth * Taps.Weights[Index];
-				FailedCreaseWeight += bKeep ? 0.0 : Taps.Weights[Index];
+				FailedCreaseDepthSum += bKeep ? 0.0 : TapDepth * TapWeight;
+				FailedCreaseWeight += bKeep ? 0.0 : TapWeight;
 			}
 
 			BRANCH
-			if (HorizontalType == EDGE_SILHOUETTE || VerticalType == EDGE_SILHOUETTE)
+			if (TapWeight > 0.0 && (HorizontalType == EDGE_SILHOUETTE || VerticalType == EDGE_SILHOUETTE))
 			{
 				const float4 TapForeground = HistorySilhouetteForeground.Load(Texel);
 				TapHorizontal.KeptRatio = TapForeground.x;
@@ -580,14 +637,14 @@ void ReprojectHistory(
 				if (HorizontalType == EDGE_SILHOUETTE)
 				{
 					const bool bKeep = IsForegroundInPlace(TapHorizontal, Center.Depth, Neighbours[0].Depth, Neighbours[1].Depth);
-					AddHistoryRecord(SilhouetteHorizontal, TapHorizontal, Taps.Offsets[Index].xy, Taps.Weights[Index] * (bKeep ? 1.0 : FAILED_TAP_WEIGHT));
-					SilhouetteHorizontalPassed += bKeep ? Taps.Weights[Index] : 0.0;
+					AddHistoryRecord(SilhouetteHorizontal, TapHorizontal, Taps.Offsets[Index].xy, TapWeight * (bKeep ? 1.0 : FAILED_TAP_WEIGHT));
+					SilhouetteHorizontalPassed += bKeep ? TapWeight : 0.0;
 				}
 				if (VerticalType == EDGE_SILHOUETTE)
 				{
 					const bool bKeep = IsForegroundInPlace(TapVertical, Center.Depth, Neighbours[2].Depth, Neighbours[3].Depth);
-					AddHistoryRecord(SilhouetteVertical, TapVertical, Taps.Offsets[Index].yx, Taps.Weights[Index] * (bKeep ? 1.0 : FAILED_TAP_WEIGHT));
-					SilhouetteVerticalPassed += bKeep ? Taps.Weights[Index] : 0.0;
+					AddHistoryRecord(SilhouetteVertical, TapVertical, Taps.Offsets[Index].yx, TapWeight * (bKeep ? 1.0 : FAILED_TAP_WEIGHT));
+					SilhouetteVerticalPassed += bKeep ? TapWeight : 0.0;
 				}
 			}
 		}
@@ -789,22 +846,32 @@ void MainCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 	bool bSilhouetteVerticalFailed = false;
 	float FailedCreaseDepth = 0.0;
 	bool bMoving = false;
+	// VELOCITY_TEST: the object velocity of this frame's history fetch, stored with the records for next frame's test.
+	float2 FetchObjectVelocity = 0.0;
 	// Where this frame's checks reach the presence's keep levels (also used without a history: a new record's first frame).
 	const uint NearCreaseMask = GetNearCreaseMask(Edges);
 	const uint NearSilhouetteMask = GetNearSilhouetteMask(Edges);
+	const FThinOutlineForeground Foreground = FindHistoryForeground(PixelPos, Center, Neighbours, Edges);
 	if (bHistoryValid != 0)
 	{
 		const uint BackgroundInReachMask = GetBackgroundInReachMask(Center, Neighbours, FarNeighbours, Edges);
-		const FThinOutlineForeground Foreground = FindHistoryForeground(PixelPos, Center, Neighbours, Edges);
 		ReprojectHistory(ViewportPos, PixelPos, Foreground, Center, Neighbours, BackgroundInReachMask,
 			CreaseHorizontal, CreaseVertical, SilhouetteHorizontal, SilhouetteVertical,
-			bCreaseHorizontalFailed, bCreaseVerticalFailed, bSilhouetteHorizontalFailed, bSilhouetteVerticalFailed, FailedCreaseDepth, bMoving);
+			bCreaseHorizontalFailed, bCreaseVerticalFailed, bSilhouetteHorizontalFailed, bSilhouetteVerticalFailed, FailedCreaseDepth, bMoving,
+			FetchObjectVelocity);
 		// Silhouette records are bounded by the background test instead: the bilinear history spreads a moving contour's
 		// records over one more pixel each frame, and the range drop cut the share that lands one pixel inside the
 		// foreground (a tenth of the silhouette under a steady pan) although its contour is still next to it.
 		DropRecordOutsideSamplingRange(CreaseHorizontal);
 		DropRecordOutsideSamplingRange(CreaseVertical);
 	}
+#if VELOCITY_TEST
+	// Without a history nothing was fetched; the records made this frame still get the velocity they would have moved with.
+	else if (!Center.bIsSky || Foreground.bFound)
+	{
+		GetPixelVelocity(Foreground.PixelPos, Foreground.DeviceZ, FetchObjectVelocity);
+	}
+#endif
 
 	CreaseHorizontal.SampleCount *= SampleCountDecay;
 	CreaseVertical.SampleCount *= SampleCountDecay;
@@ -852,4 +919,10 @@ void MainCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 
 	// Zero never passes the depth test, so sky does not hand out crease history.
 	RWDepth[ViewportPos] = Center.bIsSky ? 0.0 : (bKeepFailedDepth ? FailedCreaseDepth : Center.Depth);
+
+#if VELOCITY_TEST
+	// The object velocity this pixel's records moved with (the fetch's, see the top of the file). A record kept through a
+	// failed depth test gets it too: its fate stays with the depth test.
+	RWVelocity[ViewportPos] = FetchObjectVelocity;
+#endif
 }

@@ -93,7 +93,7 @@ float4 GetMainColor(int2 ViewportPos, float4 SceneColor, out float ForegroundDev
 	}
 
 	BRANCH
-	if (DebugView == 1 || DebugView == 2 || DebugView == 4 || DebugView == 9)
+	if (DebugView == 1 || DebugView == 2 || DebugView == 4 || DebugView == 8 || DebugView == 9)
 	{
 		return float4(GetPixelDebugColor(PixelPos, LoadAxisRecords(AXIS_HORIZONTAL, ViewportPos), LoadAxisRecords(AXIS_VERTICAL, ViewportPos)), SceneColor.a);
 	}
@@ -257,7 +257,7 @@ void AfterUpscalerPS(
 	const float4 SceneColor = InputSceneColorTexture.Load(int3(Input_ViewportMin + OutputViewportPos, 0));
 
 	BRANCH
-	if (DebugView == 1 || DebugView == 2 || DebugView == 4 || DebugView == 9)
+	if (DebugView == 1 || DebugView == 2 || DebugView == 4 || DebugView == 8 || DebugView == 9)
 	{
 		// The rendering pixel under the display pixel's center.
 		const int2 ViewSize = int2(View.ViewSizeAndInvSize.xy);

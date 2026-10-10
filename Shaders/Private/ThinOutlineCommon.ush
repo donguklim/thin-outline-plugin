@@ -116,6 +116,30 @@ float3 GetPixelVelocity(int2 PixelPos, float DeviceZ)
 		: ComputeStaticVelocity(ViewportPosToScreenPos(PixelPos - int2(View.ViewRectMin.xy)), DeviceZ);
 }
 
+// A screen velocity in viewport pixels per frame, y down (screen y is up).
+float2 ScreenVelocityToViewportPixels(float2 ScreenVelocity)
+{
+	return ScreenVelocity * View.ViewSizeAndInvSize.xy * float2(0.5, -0.5);
+}
+
+// GetPixelVelocity, and the part of the velocity that is the surface's own motion (r.ThinOutline.HistoryVelocityTest):
+// the pixel's velocity minus that of a static point at its screen position and depth, in viewport pixels per frame.
+// Exactly zero for pixels that did not draw velocity (static geometry) whatever the camera does, so a camera that
+// speeds up, stops or turns does not change it; a moving object's own screen motion otherwise.
+float3 GetPixelVelocity(int2 PixelPos, float DeviceZ, out float2 ObjectVelocity)
+{
+	const float4 EncodedVelocity = SceneTexturesStruct.GBufferVelocityTexture.Load(int3(PixelPos, 0));
+	const float3 StaticVelocity = ComputeStaticVelocity(ViewportPosToScreenPos(PixelPos - int2(View.ViewRectMin.xy)), DeviceZ);
+	ObjectVelocity = 0.0;
+	if (EncodedVelocity.x <= 0.0)
+	{
+		return StaticVelocity;
+	}
+	const float3 Velocity = DecodeVelocityFromTexture(EncodedVelocity);
+	ObjectVelocity = ScreenVelocityToViewportPixels(Velocity.xy - StaticVelocity.xy);
+	return Velocity;
+}
+
 //------------------------------------------------------- EDGE CHECKS
 
 struct FThinOutlineSample

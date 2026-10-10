@@ -40,6 +40,7 @@ namespace ThinOutline
 		{ PF_FloatRGBA, TEXT("ThinOutline.RecordVerticalB") },
 		{ PF_FloatRGBA, TEXT("ThinOutline.SilhouetteForeground") },
 		{ PF_R32_FLOAT, TEXT("ThinOutline.RecordDepth") },
+		{ PF_G16R16F, TEXT("ThinOutline.RecordVelocity") },
 	};
 
 	/** This frame's edge records of a view, for the composite after the temporal upscaler. */
@@ -74,8 +75,12 @@ namespace ThinOutline
 		return EdgeCheck;
 	}
 
-	/** DisplaySize: size of the temporal upscaler's output, whose pixels the outline thicknesses are given in. */
+	/**
+	 * DisplaySize: size of the temporal upscaler's output, whose pixels the outline thicknesses are given in. The record
+	 * velocity texture exists only with r.ThinOutline.HistoryVelocityTest (debug view 8 reads it): a dummy otherwise.
+	 */
 	FThinOutlineCompositeParameters GetCompositeParameters(
+		FRDGBuilder& GraphBuilder,
 		const FThinOutlineRenderSettings& Settings,
 		const FViewInfo& ViewInfo,
 		const FRDGTextureRef (&Records)[EThinOutlineHistoryTexture::Num],
@@ -93,6 +98,7 @@ namespace ThinOutline
 		Parameters.VerticalA                   = Records[EThinOutlineHistoryTexture::VerticalA];
 		Parameters.VerticalB                   = Records[EThinOutlineHistoryTexture::VerticalB];
 		Parameters.SilhouetteForeground        = Records[EThinOutlineHistoryTexture::SilhouetteForeground];
+		Parameters.RecordVelocity              = Records[EThinOutlineHistoryTexture::Velocity] ? Records[EThinOutlineHistoryTexture::Velocity] : GSystemTextures.GetBlackDummy(GraphBuilder);
 		Parameters.bDrawSilhouettes            = Settings.bDrawSilhouettes ? 1 : 0;
 		Parameters.bDrawCreases                = Settings.bDrawCreases ? 1 : 0;
 		Parameters.CreaseColor                 = FVector3f(Settings.CreaseColor.R, Settings.CreaseColor.G, Settings.CreaseColor.B);
@@ -233,7 +239,7 @@ namespace ThinOutline
 		PassParameters->SceneTexturesStruct    = Inputs.SceneTextures.SceneTextures;
 		PassParameters->Substrate              = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
 		PassParameters->EdgeCheck              = GetEdgeCheckParameters(Settings);
-		PassParameters->Composite              = GetCompositeParameters(Settings, ViewInfo, Records, DisplaySize);
+		PassParameters->Composite              = GetCompositeParameters(GraphBuilder, Settings, ViewInfo, Records, DisplaySize);
 		PassParameters->TileList               = GraphBuilder.CreateSRV(TileLists ? TileLists->TileList : GSystemTextures.GetDefaultStructuredBuffer(GraphBuilder, sizeof(uint32)));
 		PassParameters->bUseTileList           = TileLists ? 1 : 0;
 		PassParameters->TileCountX             = uint32(TileCount.X);
@@ -264,7 +270,7 @@ namespace ThinOutline
 	 */
 	bool CanCompositeTiles(const FThinOutlineRenderSettings& Settings, const FPostProcessMaterialInputs& Inputs, const FScreenPassTexture& SceneColor)
 	{
-		const bool bPerPixelDebugView = Settings.DebugView == 1 || Settings.DebugView == 2 || Settings.DebugView == 4 || Settings.DebugView == 9;
+		const bool bPerPixelDebugView = Settings.DebugView == 1 || Settings.DebugView == 2 || Settings.DebugView == 4 || Settings.DebugView == 8 || Settings.DebugView == 9;
 		return Settings.bTileClassification
 			&& !bPerPixelDebugView
 			&& !Inputs.OverrideOutput.IsValid()
@@ -304,7 +310,7 @@ namespace ThinOutline
 		PassParameters->SceneTexturesStruct = Inputs.SceneTextures.SceneTextures;
 		PassParameters->Substrate           = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
 		PassParameters->EdgeCheck           = GetEdgeCheckParameters(Settings);
-		PassParameters->Composite           = GetCompositeParameters(Settings, ViewInfo, ViewRecords.Textures, DisplaySize);
+		PassParameters->Composite           = GetCompositeParameters(GraphBuilder, Settings, ViewInfo, ViewRecords.Textures, DisplaySize);
 		PassParameters->DrawnEdge           = ViewRecords.DrawnEdge;
 		PassParameters->Input               = ViewportParameters;
 		PassParameters->Output              = ViewportParameters;
@@ -410,6 +416,9 @@ void FThinOutlineSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& InV
 	Settings.bIsolatedEdgeSuppression            = CVarThinOutlineIsolatedEdgeSuppression.GetValueOnGameThread() != 0;
 	Settings.SilhouetteHistoryDepthThreshold     = FMath::Max(0.0f, CVarThinOutlineSilhouetteHistoryDepthThreshold.GetValueOnGameThread());
 	Settings.HistoryReprojection                 = FMath::Clamp(CVarThinOutlineEstimatorHistoryReprojection.GetValueOnGameThread(), 0, 3);
+	Settings.bHistoryVelocityTest                = CVarThinOutlineHistoryVelocityTest.GetValueOnGameThread() != 0;
+	Settings.HistoryVelocityTolerance            = FMath::Max(0.0f, CVarThinOutlineHistoryVelocityTolerance.GetValueOnGameThread());
+	Settings.HistoryVelocityRelativeTolerance    = FMath::Max(0.0f, CVarThinOutlineHistoryVelocityRelativeTolerance.GetValueOnGameThread());
 	Settings.DebugView                           = CVarThinOutlineDebugView.GetValueOnGameThread();
 
 	ENQUEUE_RENDER_COMMAND(ThinOutlineUpdateSettings)(
@@ -522,15 +531,24 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 	// there is nothing to fetch. Only with a valid history (the mask was extracted with the records).
 	const bool bHistoryMaskValid = bHistoryValid && History->RecordMask.IsValid();
 
+	// r.ThinOutline.HistoryVelocityTest: the records' velocities exist only while the test is on (a shader permutation
+	// writes and reads them), and the test waits a frame when the history has none (the test was just turned on).
+	const bool bVelocityTest = Settings.bHistoryVelocityTest;
+	const bool bHistoryVelocityValid = bHistoryValid && bVelocityTest && History->Textures[Velocity].IsValid();
+
 	// Edge record update.
-	FRDGTextureRef Records[Num];
+	FRDGTextureRef Records[Num] = {};
 	FRDGTextureRef HistoryRecords[Num];
 	for (int32 Index = 0; Index < Num; ++Index)
 	{
 		const ThinOutline::FHistoryTextureInfo& Info = ThinOutline::HistoryTextureInfos[Index];
-		const FRDGTextureDesc Desc = FRDGTextureDesc::Create2D(ViewSize, Info.Format, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_UAV);
-		Records[Index] = GraphBuilder.CreateTexture(Desc, Info.Name);
-		HistoryRecords[Index] = bHistoryValid ? GraphBuilder.RegisterExternalTexture(History->Textures[Index]) : GSystemTextures.GetBlackDummy(GraphBuilder);
+		if (Index != Velocity || bVelocityTest)
+		{
+			const FRDGTextureDesc Desc = FRDGTextureDesc::Create2D(ViewSize, Info.Format, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_UAV);
+			Records[Index] = GraphBuilder.CreateTexture(Desc, Info.Name);
+		}
+		const bool bHistoryTextureValid = Index == Velocity ? bHistoryVelocityValid : bHistoryValid;
+		HistoryRecords[Index] = bHistoryTextureValid ? GraphBuilder.RegisterExternalTexture(History->Textures[Index]) : GSystemTextures.GetBlackDummy(GraphBuilder);
 	}
 
 	{
@@ -545,6 +563,7 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->HistoryVerticalB                    = HistoryRecords[VerticalB];
 		PassParameters->HistorySilhouetteForeground         = HistoryRecords[SilhouetteForeground];
 		PassParameters->HistoryDepth                        = HistoryRecords[Depth];
+		PassParameters->HistoryVelocity                     = HistoryRecords[Velocity];
 		PassParameters->HistoryRecordMask                   = bHistoryMaskValid ? GraphBuilder.RegisterExternalTexture(History->RecordMask) : GSystemTextures.GetZeroUIntDummy(GraphBuilder);
 		PassParameters->bHistoryMaskValid                   = bHistoryMaskValid ? 1 : 0;
 		PassParameters->RWHorizontalA                       = GraphBuilder.CreateUAV(Records[HorizontalA]);
@@ -553,6 +572,8 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->RWVerticalB                         = GraphBuilder.CreateUAV(Records[VerticalB]);
 		PassParameters->RWSilhouetteForeground              = GraphBuilder.CreateUAV(Records[SilhouetteForeground]);
 		PassParameters->RWDepth                             = GraphBuilder.CreateUAV(Records[Depth]);
+		// Unbound by the permutation without the test, so null is fine there.
+		PassParameters->RWVelocity                          = bVelocityTest ? GraphBuilder.CreateUAV(Records[Velocity]) : nullptr;
 		PassParameters->SampleLocalPosition                 = SampleLocalPosition;
 		PassParameters->SampleCountDecay                    = 1.0f - Settings.EstimatorDecay;
 		PassParameters->CreaseHistoryDepthThreshold         = Settings.CreaseHistoryDepthThreshold;
@@ -567,11 +588,15 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->PresenceDropLevel                   = Settings.PresenceDropLevel;
 		PassParameters->bHistoryValid                       = bHistoryValid ? 1 : 0;
 		PassParameters->HistoryReprojectionMode             = static_cast<uint32>(Settings.HistoryReprojection);
+		PassParameters->bHistoryVelocityValid               = bHistoryVelocityValid ? 1 : 0;
+		PassParameters->HistoryVelocityTolerance            = Settings.HistoryVelocityTolerance;
+		PassParameters->HistoryVelocityRelativeTolerance    = Settings.HistoryVelocityRelativeTolerance;
 
 		FThinOutlineRecordCS::FPermutationDomain PermutationVector;
 		const bool bViewAngleTest = Settings.SilhouetteHistoryViewAngle > 0.0f;
 		PermutationVector.Set<FThinOutlineRecordCS::FBackgroundDepthStepDim>(Settings.bSilhouetteHistoryBackgroundDepthStep);
 		PermutationVector.Set<FThinOutlineRecordCS::FSpikeFilterDim>(Settings.bSpikeFilter);
+		PermutationVector.Set<FThinOutlineRecordCS::FVelocityTestDim>(bVelocityTest);
 		PermutationVector.Set<FThinOutlineRecordCS::FViewAngleTestDim>(bViewAngleTest);
 		PermutationVector.Set<FThinOutlineRecordCS::FSurfaceTurnDim>(bViewAngleTest && Settings.bSilhouetteHistorySurfaceTurn);
 		TShaderMapRef<FThinOutlineRecordCS> ComputeShader(GetGlobalShaderMap(View.GetFeatureLevel()), PermutationVector);
@@ -608,7 +633,15 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 	{
 		for (int32 Index = 0; Index < Num; ++Index)
 		{
-			GraphBuilder.QueueTextureExtraction(Records[Index], &History->Textures[Index]);
+			if (Records[Index])
+			{
+				GraphBuilder.QueueTextureExtraction(Records[Index], &History->Textures[Index]);
+			}
+			else
+			{
+				// The velocities with the test off: a stale texture must not serve as history when it is turned back on.
+				History->Textures[Index] = nullptr;
+			}
 		}
 		if (RecordMask)
 		{
@@ -656,7 +689,7 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->SceneTexturesStruct  = Inputs.SceneTextures.SceneTextures;
 		PassParameters->Substrate            = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
 		PassParameters->EdgeCheck            = EdgeCheck;
-		PassParameters->Composite            = ThinOutline::GetCompositeParameters(Settings, ViewInfo, Records, DisplaySize);
+		PassParameters->Composite            = ThinOutline::GetCompositeParameters(GraphBuilder, Settings, ViewInfo, Records, DisplaySize);
 		PassParameters->DrawnEdge            = DrawnEdge;
 		PassParameters->Input                = ViewportParameters;
 		PassParameters->Output               = ViewportParameters;
@@ -693,7 +726,7 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->SceneTexturesStruct         = Inputs.SceneTextures.SceneTextures;
 		PassParameters->Substrate                   = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
 		PassParameters->EdgeCheck                   = EdgeCheck;
-		PassParameters->Composite                   = ThinOutline::GetCompositeParameters(Settings, ViewInfo, Records, DisplaySize);
+		PassParameters->Composite                   = ThinOutline::GetCompositeParameters(GraphBuilder, Settings, ViewInfo, Records, DisplaySize);
 		PassParameters->DrawnEdge                   = DrawnEdge;
 		PassParameters->Input                       = GetScreenPassTextureViewportParameters(InputViewport);
 		PassParameters->Output                      = GetScreenPassTextureViewportParameters(OutputViewport);
@@ -848,7 +881,7 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddAfterUpscalerPass_RenderTh
 	PassParameters->SceneTexturesStruct    = Inputs.SceneTextures.SceneTextures;
 	PassParameters->Substrate              = ViewInfo.SubstrateViewData.SubstrateGlobalUniformParameters;
 	PassParameters->EdgeCheck              = ThinOutline::GetEdgeCheckParameters(Settings);
-	PassParameters->Composite              = ThinOutline::GetCompositeParameters(Settings, ViewInfo, ViewRecords->Textures, DisplaySize);
+	PassParameters->Composite              = ThinOutline::GetCompositeParameters(GraphBuilder, Settings, ViewInfo, ViewRecords->Textures, DisplaySize);
 	PassParameters->DrawnEdge              = ViewRecords->DrawnEdge;
 	PassParameters->Input                  = GetScreenPassTextureViewportParameters(InputViewport);
 	PassParameters->Output                 = GetScreenPassTextureViewportParameters(OutputViewport);

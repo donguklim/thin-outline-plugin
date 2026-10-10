@@ -40,6 +40,9 @@ UThinOutlineSettings::UThinOutlineSettings(const FObjectInitializer& ObjectIniti
 	bSpikeFilter = true;
 	SpikeThreshold = 0.125f;
 	SpikePlaneTolerance = 0.003f;
+	bHistoryVelocityTest = true;
+	HistoryVelocityTolerance = 0.5f;
+	HistoryVelocityRelativeTolerance = 0.5f;
 	bSpatialFilter = true;
 	SpatialFilterSigma = 0.25f;
 	bAxisBlend = false;

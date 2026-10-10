@@ -43,7 +43,10 @@ public:
 	// r.ThinOutline.SpikeFilter: the crease checks skip one-pixel normal spikes (loading the normal two pixels away where a
 	// crease fired) and the silhouette checks skip one-pixel foregrounds.
 	class FSpikeFilterDim : SHADER_PERMUTATION_BOOL("SPIKE_FILTER");
-	using FPermutationDomain = TShaderPermutationDomain<FBackgroundDepthStepDim, FViewAngleTestDim, FSurfaceTurnDim, FSpikeFilterDim>;
+	// r.ThinOutline.HistoryVelocityTest: the records' object velocities are stored, and history taps that did not move with
+	// the fetch's surface are left out.
+	class FVelocityTestDim : SHADER_PERMUTATION_BOOL("VELOCITY_TEST");
+	using FPermutationDomain = TShaderPermutationDomain<FBackgroundDepthStepDim, FViewAngleTestDim, FSurfaceTurnDim, FSpikeFilterDim, FVelocityTestDim>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
@@ -56,6 +59,7 @@ public:
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, HistoryVerticalB)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, HistorySilhouetteForeground)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, HistoryDepth)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, HistoryVelocity)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, HistoryRecordMask)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWHorizontalA)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWHorizontalB)
@@ -63,6 +67,7 @@ public:
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWVerticalB)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWSilhouetteForeground)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, RWDepth)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, RWVelocity)
 		SHADER_PARAMETER(FVector2f, SampleLocalPosition)
 		SHADER_PARAMETER(float, SampleCountDecay)
 		SHADER_PARAMETER(float, CreaseHistoryDepthThreshold)
@@ -78,6 +83,9 @@ public:
 		SHADER_PARAMETER(uint32, bHistoryValid)
 		SHADER_PARAMETER(uint32, bHistoryMaskValid)
 		SHADER_PARAMETER(uint32, HistoryReprojectionMode)
+		SHADER_PARAMETER(uint32, bHistoryVelocityValid)
+		SHADER_PARAMETER(float, HistoryVelocityTolerance)
+		SHADER_PARAMETER(float, HistoryVelocityRelativeTolerance)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -105,6 +113,7 @@ BEGIN_SHADER_PARAMETER_STRUCT(FThinOutlineCompositeParameters, )
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, VerticalA)
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, VerticalB)
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, SilhouetteForeground)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, RecordVelocity)
 	SHADER_PARAMETER(uint32, bDrawSilhouettes)
 	SHADER_PARAMETER(uint32, bDrawCreases)
 	SHADER_PARAMETER(FVector3f, CreaseColor)

@@ -65,11 +65,13 @@ TAutoConsoleVariable<int32> CVarThinOutlineDebugView(
 	TEXT("    only red, both yellow; tiles without records keep the scene color (after the upscaler only)\n")
 	TEXT("7 = the suppressions: R = outline alpha removed by r.ThinOutline.DenseEdgeSuppression, G = outline alpha drawn,\n")
 	TEXT("    B = outline alpha removed by r.ThinOutline.IsolatedEdgeSuppression\n")
-	TEXT("8 = (was the alpha stabilization, removed on 2026-10-11)\n")
+	TEXT("8 = r.ThinOutline.HistoryVelocityTest: R, G = the x and y magnitudes of the object velocity stored with the pixel's\n")
+	TEXT("    records, in quarter pixels per frame (1 at 4 pixels per frame); B = 1 where it is not zero (the surface moves on\n")
+	TEXT("    its own). Black with the test off. (Was the alpha stabilization until 2026-10-11.)\n")
 	TEXT("9 = r.ThinOutline.Presence: R, G = the presence of the horizontal and vertical records (either type); B = a check of\n")
 	TEXT("    the pixel was skipped this frame as a normal spike or a thin foreground (r.ThinOutline.SpikeFilter)\n")
-	TEXT("With r.ThinOutline.DrawAfterUpscaler 1 they are drawn at display resolution: 1, 2, 4 and 9 show the rendering pixel\n")
-	TEXT("under each display pixel (not blurred by the upscaler), 3, 5 and 7 the display pixel's alpha, and 5's R stays 0.\n"),
+	TEXT("With r.ThinOutline.DrawAfterUpscaler 1 they are drawn at display resolution: 1, 2, 4, 8 and 9 show the rendering\n")
+	TEXT("pixel under each display pixel (not blurred by the upscaler), 3, 5 and 7 the display pixel's alpha, and 5's R stays 0.\n"),
 	ECVF_Default
 );
 
@@ -412,6 +414,43 @@ TAutoConsoleVariable<int32> CVarThinOutlineEstimatorHistoryReprojection(
 	TEXT("    bilinear weights, so records follow the edge continuously\n")
 	TEXT("3 = bilinear, and crease records outside the sampling range are dropped\n")
 	TEXT("Silhouette records are never range dropped: they are rejected when their background is out of reach.\n"),
+	ECVF_Default
+);
+
+TAutoConsoleVariable<int32> CVarThinOutlineHistoryVelocityTest(
+	TEXT("r.ThinOutline.HistoryVelocityTest"),
+	1,
+	TEXT("1 = the ghost a moving object leaves on a static surface at the same depth is removed: a walking character's crease\n")
+	TEXT("records used to stay on the floor pixels its feet uncover (the depth test passes, and the presence took about 12\n")
+	TEXT("frames to drop them). Each pixel stores the object velocity its records moved with (the history fetch's velocity\n")
+	TEXT("minus the camera's share, in viewport pixels per frame: exactly 0 for static geometry whatever the camera does), and\n")
+	TEXT("a history tap whose stored velocity differs from this frame's fetch by more than the tolerance\n")
+	TEXT("(r.ThinOutline.HistoryVelocityTest.Tolerance plus .RelativeTolerance times the fetch's object speed) is left out of\n")
+	TEXT("the reprojected record (both record types; dropped, not faded: the jitter cannot fail this test, and a kept record\n")
+	TEXT("would draw the ghost while it fades). One more history texture (RG16F, 4 B per pixel) and one load per history tap;\n")
+	TEXT("a separate shader permutation of the record pass. The test waits one frame after being turned on. Debug view 8\n")
+	TEXT("shows the stored velocities. (2026-10-11; a forward projection of each tap was tried alongside and removed.)\n")
+	TEXT("0 = off (no velocities stored).\n"),
+	ECVF_Default
+);
+
+TAutoConsoleVariable<float> CVarThinOutlineHistoryVelocityTolerance(
+	TEXT("r.ThinOutline.HistoryVelocityTest.Tolerance"),
+	0.5f,
+	TEXT("r.ThinOutline.HistoryVelocityTest: allowed difference between a history tap's stored object velocity and this frame's\n")
+	TEXT("fetch velocity, in viewport pixels per frame. Static geometry has exactly zero object velocity on both sides, so the\n")
+	TEXT("tolerance only matters where a surface moves on its own: a foot slower than this leaves its records on the floor it\n")
+	TEXT("uncovers.\n"),
+	ECVF_Default
+);
+
+TAutoConsoleVariable<float> CVarThinOutlineHistoryVelocityRelativeTolerance(
+	TEXT("r.ThinOutline.HistoryVelocityTest.RelativeTolerance"),
+	0.5f,
+	TEXT("r.ThinOutline.HistoryVelocityTest: the tolerance also grows by this fraction of the fetch's own object speed, so that\n")
+	TEXT("a surface moving on its own keeps its records while it accelerates (a swinging limb: the velocity stored last frame\n")
+	TEXT("lags this frame's by one frame of acceleration, up to about a third of the speed at 30 fps). A static pixel, the\n")
+	TEXT("floor under a foot, gets the base tolerance only, so the foot's records left there are still caught.\n"),
 	ECVF_Default
 );
 

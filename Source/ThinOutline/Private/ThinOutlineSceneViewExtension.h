@@ -52,6 +52,9 @@ struct FThinOutlineRenderSettings
 	bool bIsolatedEdgeSuppression = true;
 	float SilhouetteHistoryDepthThreshold = 0.0f;
 	int32 HistoryReprojection = 0;
+	bool bHistoryVelocityTest = true;
+	float HistoryVelocityTolerance = 0.5f;
+	float HistoryVelocityRelativeTolerance = 0.5f;
 	int32 DebugView = 0;
 };
 
@@ -71,6 +74,11 @@ namespace EThinOutlineHistoryTexture
 		SilhouetteForeground,
 		/** Linear depth of the pixel's surface when the records were written. */
 		Depth,
+		/**
+		 * r.ThinOutline.HistoryVelocityTest: the object velocity the pixel's records moved with (the history fetch's velocity
+		 * minus the camera's share), in viewport pixels per frame. Only created and kept while the test is on.
+		 */
+		Velocity,
 		Num
 	};
 }

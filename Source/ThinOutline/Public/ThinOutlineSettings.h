@@ -213,6 +213,33 @@ public:
 	float SpikePlaneTolerance;
 
 	/**
+	 * A moving object's records left on a static surface at the same depth (a walking character's creases on the floor pixels its feet
+	 * uncover) pass the depth test, and the presence takes about 12 frames to drop them. Each pixel stores the object velocity its records
+	 * moved with (the history fetch's velocity minus the camera's share, in pixels per frame; zero for static geometry whatever the camera
+	 * does), and a history tap whose stored velocity differs from this frame's fetch by more than the tolerance is left out of the
+	 * reprojected record. One more history texture (4 B per pixel) and one load per history tap; separate shader permutations. Debug view
+	 * 8 shows the stored velocities.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Velocity Test", meta = (ConsoleVariable = "r.ThinOutline.HistoryVelocityTest", DisplayName = "History Velocity Test"))
+	bool bHistoryVelocityTest;
+
+	/**
+	 * Allowed difference between a history tap's stored object velocity and this frame's fetch velocity, in pixels per frame. Static
+	 * geometry has exactly zero object velocity on both sides, so it only matters where a surface moves on its own: a foot slower than
+	 * this leaves its records on the floor it uncovers.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Velocity Test", meta = (ConsoleVariable = "r.ThinOutline.HistoryVelocityTest.Tolerance", ClampMin = "0.0", UIMax = "4.0"))
+	float HistoryVelocityTolerance;
+
+	/**
+	 * The tolerance also grows by this fraction of the fetch's own object speed, so that a surface moving on its own keeps its records
+	 * while it accelerates (the velocity stored last frame lags this frame's by one frame of acceleration). A static pixel, the floor
+	 * under a foot, gets the base tolerance only.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Velocity Test", meta = (ConsoleVariable = "r.ThinOutline.HistoryVelocityTest.RelativeTolerance", ClampMin = "0.0", UIMax = "2.0"))
+	float HistoryVelocityRelativeTolerance;
+
+	/**
 	 * Decay rate d of the edge records' running statistics. Samples are weighted by (1 - d)^age in frames, so a record that gets
 	 * a sample every frame holds about 1 / d samples. Lower is steadier, higher follows changes faster.
 	 */

@@ -59,6 +59,11 @@ extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorFadeMaxSpeed;
 extern TAutoConsoleVariable<float> CVarThinOutlineEstimatorSlopeSEThreshold;
 extern TAutoConsoleVariable<int32> CVarThinOutlineEstimatorHistoryReprojection;
 
+// History velocity test (both record types): a history tap whose stored object velocity disagrees with the fetch's is dropped
+extern TAutoConsoleVariable<int32> CVarThinOutlineHistoryVelocityTest;
+extern TAutoConsoleVariable<float> CVarThinOutlineHistoryVelocityTolerance;
+extern TAutoConsoleVariable<float> CVarThinOutlineHistoryVelocityRelativeTolerance;
+
 // Debugging
 extern TAutoConsoleVariable<float> CVarThinOutlineDebugCameraPan;
 extern TAutoConsoleVariable<float> CVarThinOutlineDebugCameraOrbit;
