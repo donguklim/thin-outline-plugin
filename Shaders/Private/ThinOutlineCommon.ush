@@ -60,18 +60,20 @@ uint bSymmetricDepthMeasure;
 float CreaseRidgeThreshold;
 float CreaseValleyThreshold;
 float CreaseScale;
-// r.ThinOutline.Crease.SpikeFilter: the crease checks skip a one-pixel spike of the normal field, a pixel whose normal
-// differs from both of its neighbours along the axis while those two agree with each other (|cross| of their normals
-// below CreaseSpikeThreshold) and lie on one plane (the far one's sample within CreaseSpikePlaneTolerance × depth of the
-// near one's plane: a groove's two sides do, a step's two risers do not). See DetectEdges.
-uint bCreaseSpikeFilter;
-float CreaseSpikeThreshold;
-float CreaseSpikePlaneTolerance;
+// r.ThinOutline.SpikeFilter: the crease checks skip a one-pixel spike of the normal field (a pixel whose normal differs
+// from both of its neighbours along the axis while those two are one surface), and the silhouette checks skip a
+// one-pixel foreground (a pixel nearer than both of its neighbours along the axis, which are one surface). Two pixels
+// are one surface when their normals agree (|cross| below SpikeThreshold) and lie on one plane (the second one's
+// sample within SpikePlaneTolerance × depth of the first one's plane: a groove's two sides do, a step's two risers do
+// not). See DetectEdges.
+uint bSpikeFilter;
+float SpikeThreshold;
+float SpikePlaneTolerance;
 
 // Whether the spike filter is compiled in (it loads the normal of a pixel two steps away where a crease check fired):
-// the record pass's permutation (r.ThinOutline.Crease.SpikeFilter) and the composites' debug views.
-#ifndef CREASE_SPIKE_FILTER
-#define CREASE_SPIKE_FILTER 0
+// the record pass's permutation (r.ThinOutline.SpikeFilter) and the composites' debug views.
+#ifndef SPIKE_FILTER
+#define SPIKE_FILTER 0
 #endif
 
 // Linear depth used for pixels on the far plane (sky), so they act as the farthest background.
@@ -275,8 +277,8 @@ float GetEdgeStrength(float Measure, float Threshold, float Scale)
 bool IsSameSurfaceForSpike(FThinOutlineSample A, FThinOutlineSample B)
 {
 	return A.bHasNormal && B.bHasNormal
-		&& length(cross(A.WorldNormal, B.WorldNormal)) < CreaseSpikeThreshold
-		&& abs(dot(B.TranslatedWorldPosition - A.TranslatedWorldPosition, A.WorldNormal)) <= CreaseSpikePlaneTolerance * A.Depth;
+		&& length(cross(A.WorldNormal, B.WorldNormal)) < SpikeThreshold
+		&& abs(dot(B.TranslatedWorldPosition - A.TranslatedWorldPosition, A.WorldNormal)) <= SpikePlaneTolerance * A.Depth;
 }
 
 // Silhouette strength of the background pixel's check of C toward N (O on the other side of C, F beyond N): C must be
@@ -303,6 +305,9 @@ struct FThinOutlineEdges
 	float BackgroundSilhouette[4];
 	// Largest of both.
 	float MaxSilhouette;
+	// The depth edge measure toward each neighbour (either side nearer), for the presence's keep level; 0 for the
+	// directions of a thin foreground skipped by the spike filter.
+	float DepthMeasure[4];
 	// Crease strength of each axial direction. All zero when the pixel has a silhouette.
 	float Crease[4];
 	// Crease measure of each axial direction, also when the pixel has a silhouette; 0 across a depth discontinuity or
@@ -310,8 +315,8 @@ struct FThinOutlineEdges
 	float CreaseMeasure[4];
 	// Whether the crease of each direction is a ridge (convex) rather than a valley.
 	bool bRidge[4];
-	// Directions (bit i for NeighbourOffsets[i]) whose crease check was skipped as a one-pixel normal spike
-	// (CREASE_SPIKE_FILTER; debug view 9).
+	// Directions (bit i for NeighbourOffsets[i]) whose crease check was skipped as a one-pixel normal spike, or whose
+	// silhouette check as a one-pixel foreground (SPIKE_FILTER; debug view 9).
 	uint SpikeMask;
 };
 
@@ -351,13 +356,45 @@ FThinOutlineEdges DetectEdges(int2 PixelPos, FThinOutlineSample Center, FThinOut
 		{
 			Edges.Silhouette[Index] = 0.0;
 			Edges.BackgroundSilhouette[Index] = Neighbour.bIsSky ? 0.0 : 1.0;
+			Edges.DepthMeasure[Index] = Neighbour.bIsSky ? 0.0 : THIN_OUTLINE_FAR_DEPTH;
 		}
 		else
 		{
 			const float Strength = GetEdgeStrength(DepthEdgeMeasures[Index], SilhouetteThreshold, SilhouetteScale);
 			Edges.Silhouette[Index] = Center.Depth < Neighbour.Depth ? Strength : 0.0;
 			Edges.BackgroundSilhouette[Index] = Center.Depth > Neighbour.Depth ? Strength : 0.0;
+			Edges.DepthMeasure[Index] = DepthEdgeMeasures[Index];
 		}
+	}
+
+#if SPIKE_FILTER
+	// r.ThinOutline.SpikeFilter for silhouettes: a one-pixel foreground, nearer than both of its neighbours along an axis
+	// while those two are one surface (a wire, a railing, a pole thinner than a pixel at a distance: hit by the jittered
+	// sample on some frames, it pops), records no silhouette toward either; the measure is cleared too, so the presence
+	// does not count it as found. The pixels beside it keep their background checks (they are behind it).
+	BRANCH
+	if (bSpikeFilter != 0)
+	{
+		UNROLL
+		for (uint Axis = 0; Axis < 2; ++Axis)
+		{
+			const uint First = 2 * Axis;
+			const uint Second = First + 1;
+			if (Edges.Silhouette[First] > 0.0 && Edges.Silhouette[Second] > 0.0 && IsSameSurfaceForSpike(Neighbours[First], Neighbours[Second]))
+			{
+				Edges.Silhouette[First] = 0.0;
+				Edges.Silhouette[Second] = 0.0;
+				Edges.DepthMeasure[First] = 0.0;
+				Edges.DepthMeasure[Second] = 0.0;
+				Edges.SpikeMask |= 3u << First;
+			}
+		}
+	}
+#endif
+
+	UNROLL
+	for (uint Index = 0; Index < 4; ++Index)
+	{
 		Edges.MaxSilhouette = max(Edges.MaxSilhouette, max(Edges.Silhouette[Index], Edges.BackgroundSilhouette[Index]));
 	}
 
@@ -387,8 +424,8 @@ FThinOutlineEdges DetectEdges(int2 PixelPos, FThinOutlineSample Center, FThinOut
 		}
 	}
 
-#if CREASE_SPIKE_FILTER
-	// r.ThinOutline.Crease.SpikeFilter: a one-pixel spike of the normal field is not a crease (a groove wall thinner than
+#if SPIKE_FILTER
+	// r.ThinOutline.SpikeFilter for creases: a one-pixel spike of the normal field is not a crease (a groove wall thinner than
 	// a pixel, hit by the jittered sample on some frames: a few pixels pop on every frame of a distant surface, and the
 	// records they fed drew dots that blinked or stayed). The target is a spike when it has a crease toward both of its
 	// neighbours along an axis and those two are one surface (IsSameSurfaceForSpike: normals agreeing, one plane); a
@@ -399,7 +436,7 @@ FThinOutlineEdges DetectEdges(int2 PixelPos, FThinOutlineSample Center, FThinOut
 	// four up front for every pixel cost 0.007 ms at 73%, about 7% of the plugin's time). A real ridge one pixel wide on
 	// a flat surface (a thin wall seen edge-on at a distance) is dropped with the spikes; a step is kept.
 	BRANCH
-	if (bCreaseSpikeFilter != 0)
+	if (bSpikeFilter != 0)
 	{
 		UNROLL
 		for (uint Axis = 0; Axis < 2; ++Axis)
@@ -455,17 +492,16 @@ struct FThinOutlineRecord
 	float2 Mean;
 	float2 Variance;
 	float Covariance;
-	// Bad frames in a row (ThinOutlineRecord.usf, UpdateAxisRecord): frames on which the record failed a history test or,
-	// for a crease record, met a silhouette sample. The record is kept, at full strength, until
-	// r.ThinOutline.Estimator.FadeFrames.
-	float FadeCount;
+	// Presence: the fraction of recent frames on which the record's edge was found at the pixel along its axis and its
+	// history tests passed (ThinOutlineRecord.usf, UpdatePresence). The drawn strength ramps with it
+	// (r.ThinOutline.Presence) and the record is dropped below the drop level.
+	float Presence;
 	// Mean edge strength of the samples.
 	float Strength;
 	// Fraction of the samples recorded through the left (top) check. Only stored for silhouettes, where it is close
 	// to 1 when the background is on the left (top) and close to 0 when it is on the right (bottom).
 	float KeptRatio;
-	// Silhouettes: mean linear depth of the pixel when it recorded its samples, i.e. of the foreground. Creases (with the
-	// crease history test of ThinOutlineRecord.usf): frames since a crease was last found at the pixel along the axis.
+	// Silhouettes: mean linear depth of the pixel when it recorded its samples, i.e. of the foreground. 0 for creases.
 	float ForegroundDepth;
 };
 
@@ -474,7 +510,7 @@ FThinOutlineRecord GetEmptyRecord()
 	return (FThinOutlineRecord)0;
 }
 
-// Two RGBA16F textures per axis: A = (n, mean u, mean v, fade count), B = (variance u, variance v, covariance,
+// Two RGBA16F textures per axis: A = (n, mean u, mean v, presence), B = (variance u, variance v, covariance,
 // strength), with -n for silhouette records. The kept ratio and foreground depth of silhouette records are stored
 // separately.
 FThinOutlineRecord UnpackRecord(float4 A, float4 B, out uint EdgeType)
@@ -482,7 +518,7 @@ FThinOutlineRecord UnpackRecord(float4 A, float4 B, out uint EdgeType)
 	FThinOutlineRecord Record;
 	Record.SampleCount = abs(A.x);
 	Record.Mean = A.yz;
-	Record.FadeCount = A.w;
+	Record.Presence = A.w;
 	Record.Variance = B.xy;
 	Record.Covariance = B.z;
 	Record.Strength = B.w;
@@ -494,7 +530,7 @@ FThinOutlineRecord UnpackRecord(float4 A, float4 B, out uint EdgeType)
 
 void PackRecord(FThinOutlineRecord Record, uint EdgeType, out float4 A, out float4 B)
 {
-	A = float4(EdgeType == EDGE_SILHOUETTE ? -Record.SampleCount : Record.SampleCount, Record.Mean, Record.FadeCount);
+	A = float4(EdgeType == EDGE_SILHOUETTE ? -Record.SampleCount : Record.SampleCount, Record.Mean, Record.Presence);
 	B = float4(Record.Variance, Record.Covariance, Record.Strength);
 }
 
@@ -538,7 +574,7 @@ FThinOutlineRecord MergeRecords(FThinOutlineRecord Record0, FThinOutlineRecord R
 	const float2 Delta1 = Record1.Mean - Merged.Mean;
 	Merged.Variance = Weight0 * (Record0.Variance + Delta0 * Delta0) + Weight1 * (Record1.Variance + Delta1 * Delta1);
 	Merged.Covariance = Weight0 * (Record0.Covariance + Delta0.x * Delta0.y) + Weight1 * (Record1.Covariance + Delta1.x * Delta1.y);
-	Merged.FadeCount = Weight0 * Record0.FadeCount + Weight1 * Record1.FadeCount;
+	Merged.Presence = Weight0 * Record0.Presence + Weight1 * Record1.Presence;
 	Merged.Strength = Weight0 * Record0.Strength + Weight1 * Record1.Strength;
 	Merged.KeptRatio = Weight0 * Record0.KeptRatio + Weight1 * Record1.KeptRatio;
 	Merged.ForegroundDepth = Weight0 * Record0.ForegroundDepth + Weight1 * Record1.ForegroundDepth;

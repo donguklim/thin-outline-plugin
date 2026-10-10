@@ -68,9 +68,9 @@ namespace ThinOutline
 		EdgeCheck.CreaseRidgeThreshold   = Settings.CreaseRidgeThreshold;
 		EdgeCheck.CreaseValleyThreshold  = Settings.CreaseValleyThreshold;
 		EdgeCheck.CreaseScale            = Settings.CreaseScale;
-		EdgeCheck.bCreaseSpikeFilter     = Settings.bCreaseSpikeFilter ? 1 : 0;
-		EdgeCheck.CreaseSpikeThreshold   = Settings.CreaseSpikeThreshold;
-		EdgeCheck.CreaseSpikePlaneTolerance = Settings.CreaseSpikePlaneTolerance;
+		EdgeCheck.bSpikeFilter           = Settings.bSpikeFilter ? 1 : 0;
+		EdgeCheck.SpikeThreshold         = Settings.SpikeThreshold;
+		EdgeCheck.SpikePlaneTolerance    = Settings.SpikePlaneTolerance;
 		return EdgeCheck;
 	}
 
@@ -100,7 +100,6 @@ namespace ThinOutline
 		Parameters.RenderPixelsPerDisplayPixel = RenderPixelsPerDisplayPixel;
 		Parameters.CreaseThickness             = Settings.CreaseThickness * MeanRenderPixelsPerDisplayPixel;
 		Parameters.SilhouetteThickness         = Settings.SilhouetteThickness * MeanRenderPixelsPerDisplayPixel;
-		Parameters.FadeLimit                   = float(Settings.FadeFrames);
 		Parameters.SlopeStandardErrorThreshold = Settings.SlopeStandardErrorThreshold;
 		Parameters.bSpatialFilter              = Settings.bSpatialFilter ? 1 : 0;
 		Parameters.SpatialFilterSigma          = Settings.SpatialFilterSigma;
@@ -109,9 +108,9 @@ namespace ThinOutline
 		Parameters.DenseEdgeSuppression        = static_cast<uint32>(Settings.DenseEdgeSuppression);
 		Parameters.DenseEdgeTolerance          = Settings.DenseEdgeTolerance;
 		Parameters.bIsolatedEdgeSuppression    = Settings.bIsolatedEdgeSuppression ? 1 : 0;
-		Parameters.bCreasePresence             = Settings.bCreasePresence ? 1 : 0;
-		Parameters.CreasePresenceDrawMin       = Settings.CreasePresenceDrawMin;
-		Parameters.CreasePresenceDrawMax       = Settings.CreasePresenceDrawMax;
+		Parameters.bPresence                   = Settings.bPresence ? 1 : 0;
+		Parameters.PresenceDrawMin             = Settings.PresenceDrawMin;
+		Parameters.PresenceDrawMax             = Settings.PresenceDrawMax;
 		Parameters.DistinctSampleScale         = FMath::Min(1.0f, Settings.EstimatorDecay * float(FMath::Max(ViewInfo.TemporalJitterSequenceLength, 1)));
 		Parameters.SaturatedSampleCount        = 1.0f / Settings.EstimatorDecay;
 		Parameters.DebugView                   = static_cast<uint32>(FMath::Max(Settings.DebugView, 0));
@@ -389,20 +388,19 @@ void FThinOutlineSceneViewExtension::BeginRenderViewFamily(FSceneViewFamily& InV
 	Settings.CreaseScale                         = FMath::Max(0.0f, CVarThinOutlineCreaseScale.GetValueOnGameThread());
 	Settings.CreaseThickness                     = FMath::Max(0.0f, CVarThinOutlineCreaseThickness.GetValueOnGameThread());
 	Settings.EstimatorDecay                      = FMath::Clamp(CVarThinOutlineEstimatorDecay.GetValueOnGameThread(), 0.001f, 1.0f);
-	Settings.FadeFrames                          = FMath::Max(1, CVarThinOutlineEstimatorFadeFrames.GetValueOnGameThread());
 	Settings.FadeMaxSpeed                        = FMath::Max(0.0f, CVarThinOutlineEstimatorFadeMaxSpeed.GetValueOnGameThread());
 	Settings.SlopeStandardErrorThreshold         = FMath::Max(0.0f, CVarThinOutlineEstimatorSlopeSEThreshold.GetValueOnGameThread());
 	Settings.CreaseHistoryDepthThreshold         = FMath::Max(0.0f, CVarThinOutlineCreaseHistoryDepthThreshold.GetValueOnGameThread());
-	// At most 1: a crease sample then always counts as a crease found.
-	Settings.CreaseHistoryCreaseTestThreshold    = FMath::Clamp(CVarThinOutlineCreaseHistoryCreaseTestThreshold.GetValueOnGameThread(), 0.0f, 1.0f);
-	Settings.bCreasePresence                     = CVarThinOutlineCreasePresence.GetValueOnGameThread() != 0;
-	Settings.CreasePresenceFrames                = FMath::Max(1.0f, CVarThinOutlineCreasePresenceFrames.GetValueOnGameThread());
-	Settings.CreasePresenceDrawMin               = FMath::Clamp(CVarThinOutlineCreasePresenceDrawMin.GetValueOnGameThread(), 0.0f, 1.0f);
-	Settings.CreasePresenceDrawMax               = FMath::Clamp(CVarThinOutlineCreasePresenceDrawMax.GetValueOnGameThread(), 0.0f, 1.0f);
-	Settings.CreasePresenceDropLevel             = FMath::Clamp(CVarThinOutlineCreasePresenceDropLevel.GetValueOnGameThread(), 0.0f, 1.0f);
-	Settings.bCreaseSpikeFilter                  = CVarThinOutlineCreaseSpikeFilter.GetValueOnGameThread() != 0;
-	Settings.CreaseSpikeThreshold                = FMath::Max(0.0f, CVarThinOutlineCreaseSpikeThreshold.GetValueOnGameThread());
-	Settings.CreaseSpikePlaneTolerance           = FMath::Max(0.0f, CVarThinOutlineCreaseSpikePlaneTolerance.GetValueOnGameThread());
+	Settings.bPresence                           = CVarThinOutlinePresence.GetValueOnGameThread() != 0;
+	Settings.PresenceFrames                      = FMath::Max(1.0f, CVarThinOutlinePresenceFrames.GetValueOnGameThread());
+	Settings.PresenceDrawMin                     = FMath::Clamp(CVarThinOutlinePresenceDrawMin.GetValueOnGameThread(), 0.0f, 1.0f);
+	Settings.PresenceDrawMax                     = FMath::Clamp(CVarThinOutlinePresenceDrawMax.GetValueOnGameThread(), 0.0f, 1.0f);
+	Settings.PresenceDropLevel                   = FMath::Clamp(CVarThinOutlinePresenceDropLevel.GetValueOnGameThread(), 0.0f, 1.0f);
+	// At most 1: a sample then always counts as the edge found.
+	Settings.PresenceKeepLevel                   = FMath::Clamp(CVarThinOutlinePresenceKeepLevel.GetValueOnGameThread(), 0.0f, 1.0f);
+	Settings.bSpikeFilter                        = CVarThinOutlineSpikeFilter.GetValueOnGameThread() != 0;
+	Settings.SpikeThreshold                      = FMath::Max(0.0f, CVarThinOutlineSpikeThreshold.GetValueOnGameThread());
+	Settings.SpikePlaneTolerance                 = FMath::Max(0.0f, CVarThinOutlineSpikePlaneTolerance.GetValueOnGameThread());
 	Settings.bSpatialFilter                      = CVarThinOutlineSpatialFilter.GetValueOnGameThread() != 0;
 	Settings.SpatialFilterSigma                  = FMath::Max(0.001f, CVarThinOutlineSpatialFilterSigma.GetValueOnGameThread());
 	Settings.bAxisBlend                          = CVarThinOutlineAxisBlend.GetValueOnGameThread() != 0;
@@ -561,20 +559,19 @@ FScreenPassTexture FThinOutlineSceneViewExtension::AddOutlinePass_RenderThread(
 		PassParameters->SilhouetteHistoryDepthThreshold     = Settings.SilhouetteHistoryDepthThreshold;
 		PassParameters->SilhouetteHistorySinAngle           = FMath::Sin(FMath::DegreesToRadians(Settings.SilhouetteHistoryViewAngle));
 		PassParameters->SilhouetteCreaseTakeoverSampleCount = Settings.SilhouetteCreaseTakeoverSampleCount;
-		PassParameters->FadeLimit                           = float(Settings.FadeFrames);
 		PassParameters->FadeMaxSpeed                        = Settings.FadeMaxSpeed;
-		PassParameters->CreaseHistoryKeepRidgeThreshold     = Settings.CreaseHistoryCreaseTestThreshold * Settings.CreaseRidgeThreshold;
-		PassParameters->CreaseHistoryKeepValleyThreshold    = Settings.CreaseHistoryCreaseTestThreshold * Settings.CreaseValleyThreshold;
-		PassParameters->CreasePresenceRate                  = 1.0f / Settings.CreasePresenceFrames;
-		PassParameters->CreasePresenceDropLevel             = Settings.CreasePresenceDropLevel;
+		PassParameters->CreaseHistoryKeepRidgeThreshold     = Settings.PresenceKeepLevel * Settings.CreaseRidgeThreshold;
+		PassParameters->CreaseHistoryKeepValleyThreshold    = Settings.PresenceKeepLevel * Settings.CreaseValleyThreshold;
+		PassParameters->SilhouetteKeepThreshold             = Settings.PresenceKeepLevel * Settings.SilhouetteThreshold;
+		PassParameters->PresenceRate                        = 1.0f / Settings.PresenceFrames;
+		PassParameters->PresenceDropLevel                   = Settings.PresenceDropLevel;
 		PassParameters->bHistoryValid                       = bHistoryValid ? 1 : 0;
 		PassParameters->HistoryReprojectionMode             = static_cast<uint32>(Settings.HistoryReprojection);
 
 		FThinOutlineRecordCS::FPermutationDomain PermutationVector;
 		const bool bViewAngleTest = Settings.SilhouetteHistoryViewAngle > 0.0f;
 		PermutationVector.Set<FThinOutlineRecordCS::FBackgroundDepthStepDim>(Settings.bSilhouetteHistoryBackgroundDepthStep);
-		PermutationVector.Set<FThinOutlineRecordCS::FCreasePresenceDim>(Settings.bCreasePresence);
-		PermutationVector.Set<FThinOutlineRecordCS::FCreaseSpikeFilterDim>(Settings.bCreaseSpikeFilter);
+		PermutationVector.Set<FThinOutlineRecordCS::FSpikeFilterDim>(Settings.bSpikeFilter);
 		PermutationVector.Set<FThinOutlineRecordCS::FViewAngleTestDim>(bViewAngleTest);
 		PermutationVector.Set<FThinOutlineRecordCS::FSurfaceTurnDim>(bViewAngleTest && Settings.bSilhouetteHistorySurfaceTurn);
 		TShaderMapRef<FThinOutlineRecordCS> ComputeShader(GetGlobalShaderMap(View.GetFeatureLevel()), PermutationVector);

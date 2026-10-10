@@ -22,8 +22,8 @@
 	only (one thread group per tile listed by ThinOutlineTileClassify.usf), reading and writing the scene color in place.
 =============================================================================*/
 
-// The debug views 1 and 9 show the edge checks with the spike filter, which needs the normals two pixels away.
-#define CREASE_SPIKE_FILTER 1
+// The debug views 1 and 9 show the edge checks with the spike filter.
+#define SPIKE_FILTER 1
 
 #include "ThinOutlineSelect.ush"
 #include "/Engine/Private/ScreenPass.ush"

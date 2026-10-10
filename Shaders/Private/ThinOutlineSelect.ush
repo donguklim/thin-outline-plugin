@@ -53,8 +53,6 @@ float2 RenderPixelsPerDisplayPixel;
 // Outline thicknesses, in rendering pixels.
 float CreaseThickness;
 float SilhouetteThickness;
-// r.ThinOutline.Estimator.FadeFrames (debug view 2).
-float FadeLimit;
 float SlopeStandardErrorThreshold;
 // r.ThinOutline.AxisBlend: two axes' candidates are blended by how clearly one is preferred instead of switched
 // (GetVerticalWeight); AxisBlendScale is the slope difference, in its standard errors, at which one is drawn alone.
@@ -71,11 +69,11 @@ uint DenseEdgeSuppression;
 // Two neighbouring pixels have reconstructed the same edge when their center crossings differ by less than this many
 // standard errors of the difference.
 float DenseEdgeTolerance;
-// r.ThinOutline.Crease.Presence: a crease's strength is scaled by a ramp on its pooled record's presence (the fraction of
-// recent frames with a crease found at the pixel, kept by the record pass): 0 at PresenceDrawMin, 1 at PresenceDrawMax.
-uint bCreasePresence;
-float CreasePresenceDrawMin;
-float CreasePresenceDrawMax;
+// r.ThinOutline.Presence: an edge's strength is scaled by a ramp on its pooled record's presence (the fraction of recent
+// frames with the edge found at the pixel, kept by the record pass): 0 at PresenceDrawMin, 1 at PresenceDrawMax.
+uint bPresence;
+float PresenceDrawMin;
+float PresenceDrawMax;
 // r.ThinOutline.IsolatedEdgeSuppression: a drawn edge that runs over fewer than three pixels across its axis (pooled
 // records of its kind that can be fitted in the rows above and below, or in one of them and the row beyond it, for a
 // near-vertical edge) is a speck and is not drawn (RefineCandidate).
@@ -112,10 +110,8 @@ FThinOutlineRecord LoadRecord(uint Axis, int2 ViewportPos, out uint EdgeType)
 	}
 
 	// Loaded unconditionally, in parallel with the record: waiting for the type first costs a second round trip.
-	// Silhouette records: the kept ratio (the foreground depth is not needed here). Crease records: the presence.
-	const float4 Foreground = SilhouetteForeground.Load(Texel);
-	Record.KeptRatio = Axis == AXIS_HORIZONTAL ? Foreground.x : Foreground.y;
-	Record.ForegroundDepth = EdgeType == EDGE_CREASE ? (Axis == AXIS_HORIZONTAL ? Foreground.z : Foreground.w) : 0.0;
+	const float2 KeptRatios = SilhouetteForeground.Load(Texel).xy;
+	Record.KeptRatio = Axis == AXIS_HORIZONTAL ? KeptRatios.x : KeptRatios.y;
 	return Record;
 }
 
@@ -366,10 +362,10 @@ FThinOutlineCandidate GetCandidate(uint EdgeType, FThinOutlineAxisRecords AxisRe
 
 	Candidate.Fit = FitEdge(Record, DistinctSampleScale);
 	Candidate.Strength = Record.Strength;
-	if (EdgeType == EDGE_CREASE && bCreasePresence != 0)
+	if (bPresence != 0)
 	{
 		// The pooled record's presence is the sample-count-weighted mean of the pooled records' (MergeRecords).
-		Candidate.Strength *= saturate((Record.ForegroundDepth - CreasePresenceDrawMin) / max(CreasePresenceDrawMax - CreasePresenceDrawMin, 1.0e-4));
+		Candidate.Strength *= saturate((Record.Presence - PresenceDrawMin) / max(PresenceDrawMax - PresenceDrawMin, 1.0e-4));
 	}
 
 	// An axis whose own record is a silhouette record draws no crease. The pixel only draws the part of the outline band
@@ -808,15 +804,15 @@ float3 GetPixelDebugColor(int2 PixelPos, FThinOutlineAxisRecords HorizontalRecor
 		LoadOutlineNeighbourhood(PixelPos, Center, Neighbours, FarNeighbours);
 		const FThinOutlineEdges Edges = DetectEdges(PixelPos, Center, Neighbours, FarNeighbours);
 
-		// Debug view 9: R, G = the presence of the horizontal and vertical crease records (r.ThinOutline.Crease.Presence),
-		// B = a crease check of the pixel was skipped as a normal spike this frame (r.ThinOutline.Crease.SpikeFilter).
+		// Debug view 9: R, G = the presence of the horizontal and vertical records, of either type (r.ThinOutline.Presence),
+		// B = a check of the pixel was skipped this frame as a normal spike or a thin foreground (r.ThinOutline.SpikeFilter).
 		if (DebugView == 9)
 		{
-			const FThinOutlineRecord HorizontalCrease = GetRecordOfType(HorizontalRecords, OWN_INDEX, EDGE_CREASE);
-			const FThinOutlineRecord VerticalCrease = GetRecordOfType(VerticalRecords, OWN_INDEX, EDGE_CREASE);
+			const FThinOutlineRecord HorizontalRecord = HorizontalRecords.Records[OWN_INDEX];
+			const FThinOutlineRecord VerticalRecord = VerticalRecords.Records[OWN_INDEX];
 			return float3(
-				HorizontalCrease.SampleCount > 0.0 ? HorizontalCrease.ForegroundDepth : 0.0,
-				VerticalCrease.SampleCount > 0.0 ? VerticalCrease.ForegroundDepth : 0.0,
+				HorizontalRecord.SampleCount > 0.0 ? HorizontalRecord.Presence : 0.0,
+				VerticalRecord.SampleCount > 0.0 ? VerticalRecord.Presence : 0.0,
 				Edges.SpikeMask != 0 ? 1.0 : 0.0);
 		}
 
@@ -836,9 +832,9 @@ float3 GetPixelDebugColor(int2 PixelPos, FThinOutlineAxisRecords HorizontalRecor
 	const FThinOutlineRecord HorizontalRecord = GetRecordOfType(HorizontalRecords, OWN_INDEX, EdgeType);
 	const FThinOutlineRecord VerticalRecord = GetRecordOfType(VerticalRecords, OWN_INDEX, EdgeType);
 
-	// Creases: fade count relative to the limit. Silhouettes: kept ratio of the record with more samples.
+	// Creases: the larger presence. Silhouettes: kept ratio of the record with more samples.
 	const float Blue = EdgeType == EDGE_CREASE
-		? saturate(max(HorizontalRecord.FadeCount, VerticalRecord.FadeCount) / FadeLimit)
+		? max(HorizontalRecord.Presence, VerticalRecord.Presence)
 		: (HorizontalRecord.SampleCount >= VerticalRecord.SampleCount ? HorizontalRecord.KeptRatio : VerticalRecord.KeptRatio);
 
 	return float3(

@@ -19,9 +19,9 @@ BEGIN_SHADER_PARAMETER_STRUCT(FThinOutlineEdgeCheckParameters, )
 	SHADER_PARAMETER(float, CreaseRidgeThreshold)
 	SHADER_PARAMETER(float, CreaseValleyThreshold)
 	SHADER_PARAMETER(float, CreaseScale)
-	SHADER_PARAMETER(uint32, bCreaseSpikeFilter)
-	SHADER_PARAMETER(float, CreaseSpikeThreshold)
-	SHADER_PARAMETER(float, CreaseSpikePlaneTolerance)
+	SHADER_PARAMETER(uint32, bSpikeFilter)
+	SHADER_PARAMETER(float, SpikeThreshold)
+	SHADER_PARAMETER(float, SpikePlaneTolerance)
 END_SHADER_PARAMETER_STRUCT()
 
 // Adds this frame's jittered edge check results to the per-pixel edge records, carrying the records over from the
@@ -40,12 +40,10 @@ public:
 	class FViewAngleTestDim : SHADER_PERMUTATION_BOOL("VIEW_ANGLE_TEST");
 	// r.ThinOutline.Silhouette.HistorySurfaceTurn: the view-angle test relative to the surface's own turn.
 	class FSurfaceTurnDim : SHADER_PERMUTATION_BOOL("SURFACE_TURN");
-	// r.ThinOutline.Crease.Presence: crease records carry the fraction of recent frames with a crease found at their pixel
-	// and are dropped when it sinks below the drop level.
-	class FCreasePresenceDim : SHADER_PERMUTATION_BOOL("CREASE_PRESENCE");
-	// r.ThinOutline.Crease.SpikeFilter: the crease checks skip one-pixel normal spikes (loads the normals two pixels away).
-	class FCreaseSpikeFilterDim : SHADER_PERMUTATION_BOOL("CREASE_SPIKE_FILTER");
-	using FPermutationDomain = TShaderPermutationDomain<FBackgroundDepthStepDim, FViewAngleTestDim, FSurfaceTurnDim, FCreasePresenceDim, FCreaseSpikeFilterDim>;
+	// r.ThinOutline.SpikeFilter: the crease checks skip one-pixel normal spikes (loading the normal two pixels away where a
+	// crease fired) and the silhouette checks skip one-pixel foregrounds.
+	class FSpikeFilterDim : SHADER_PERMUTATION_BOOL("SPIKE_FILTER");
+	using FPermutationDomain = TShaderPermutationDomain<FBackgroundDepthStepDim, FViewAngleTestDim, FSurfaceTurnDim, FSpikeFilterDim>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
@@ -71,12 +69,12 @@ public:
 		SHADER_PARAMETER(float, SilhouetteHistoryDepthThreshold)
 		SHADER_PARAMETER(float, SilhouetteHistorySinAngle)
 		SHADER_PARAMETER(float, SilhouetteCreaseTakeoverSampleCount)
-		SHADER_PARAMETER(float, FadeLimit)
 		SHADER_PARAMETER(float, FadeMaxSpeed)
 		SHADER_PARAMETER(float, CreaseHistoryKeepRidgeThreshold)
 		SHADER_PARAMETER(float, CreaseHistoryKeepValleyThreshold)
-		SHADER_PARAMETER(float, CreasePresenceRate)
-		SHADER_PARAMETER(float, CreasePresenceDropLevel)
+		SHADER_PARAMETER(float, SilhouetteKeepThreshold)
+		SHADER_PARAMETER(float, PresenceRate)
+		SHADER_PARAMETER(float, PresenceDropLevel)
 		SHADER_PARAMETER(uint32, bHistoryValid)
 		SHADER_PARAMETER(uint32, bHistoryMaskValid)
 		SHADER_PARAMETER(uint32, HistoryReprojectionMode)
@@ -114,7 +112,6 @@ BEGIN_SHADER_PARAMETER_STRUCT(FThinOutlineCompositeParameters, )
 	SHADER_PARAMETER(FVector2f, RenderPixelsPerDisplayPixel)
 	SHADER_PARAMETER(float, CreaseThickness)
 	SHADER_PARAMETER(float, SilhouetteThickness)
-	SHADER_PARAMETER(float, FadeLimit)
 	SHADER_PARAMETER(float, SlopeStandardErrorThreshold)
 	SHADER_PARAMETER(uint32, bSpatialFilter)
 	SHADER_PARAMETER(float, SpatialFilterSigma)
@@ -123,9 +120,9 @@ BEGIN_SHADER_PARAMETER_STRUCT(FThinOutlineCompositeParameters, )
 	SHADER_PARAMETER(uint32, DenseEdgeSuppression)
 	SHADER_PARAMETER(float, DenseEdgeTolerance)
 	SHADER_PARAMETER(uint32, bIsolatedEdgeSuppression)
-	SHADER_PARAMETER(uint32, bCreasePresence)
-	SHADER_PARAMETER(float, CreasePresenceDrawMin)
-	SHADER_PARAMETER(float, CreasePresenceDrawMax)
+	SHADER_PARAMETER(uint32, bPresence)
+	SHADER_PARAMETER(float, PresenceDrawMin)
+	SHADER_PARAMETER(float, PresenceDrawMax)
 	SHADER_PARAMETER(float, DistinctSampleScale)
 	SHADER_PARAMETER(float, SaturatedSampleCount)
 	SHADER_PARAMETER(uint32, DebugView)

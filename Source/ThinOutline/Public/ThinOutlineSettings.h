@@ -151,65 +151,66 @@ public:
 	float CreaseHistoryDepthThreshold;
 
 	/**
-	 * Each crease record carries its presence, the fraction of recent frames with a crease found at its pixel along its axis, as an
-	 * exponential average over about Presence Frames frames. The drawn crease strength is scaled by a ramp on it (0 at Presence Draw Min,
-	 * 1 at Presence Draw Max) and the record is dropped below Presence Drop Level. So a crease found on a few frames only (a groove wall
-	 * thinner than a pixel, hit by the jittered sample now and then: the pops of a distant surface) stays faint or invisible, a junction
-	 * found every other frame draws steadily at part strength, a new crease fades in over a few frames, and a record that no longer
-	 * describes a crease at its pixel (footprints, records slid along a surface, copies on a face widening on screen) fades out and is
-	 * dropped. Off: the depth test alone keeps crease records. Separate shader permutations. Debug view 9.
+	 * Each edge record (crease or silhouette) carries its presence, the fraction of recent frames on which its edge was found at its pixel
+	 * along its axis and its history tests passed, as an exponential average over about Frames frames. The drawn strength is scaled by a
+	 * ramp on it (0 at Draw Min, 1 at Draw Max) and the record is dropped below Drop Level. So an edge found on a few frames only (a groove
+	 * wall or a wire thinner than a pixel, hit by the jittered sample now and then: the pops of a distant surface) stays faint or
+	 * invisible, a junction found every other frame draws steadily at part strength, a new edge fades in over a few frames, and a record
+	 * that fails its tests or no longer describes an edge at its pixel fades out and is dropped. Off: the strength as recorded, records
+	 * dropped only by their history tests on moving pixels and by sample decay. Debug view 9.
 	 */
-	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.Presence", DisplayName = "Crease Presence"))
-	bool bCreasePresence;
+	UPROPERTY(config, EditAnywhere, Category = "Presence", meta = (ConsoleVariable = "r.ThinOutline.Presence", DisplayName = "Presence"))
+	bool bPresence;
 
 	/**
-	 * Memory of the presence average, in frames. With 4: creases found on 1 frame in 4 or fewer stay below the draw ramp, a new crease fades
-	 * in over about 9 frames (to 90%, with the draw ramp ending at 1), a lost one fades out and is dropped after about 12. Larger is
-	 * steadier and slower.
+	 * Memory of the presence average, in frames. With 4: edges found on 1 frame in 4 or fewer stay below the draw ramp, a new edge fades in
+	 * over about 9 frames (to 90%, with the draw ramp ending at 1), a lost one fades out and is dropped after about 12. Larger is steadier
+	 * and slower.
 	 */
-	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.PresenceFrames", ClampMin = "1.0", UIMax = "16.0"))
-	float CreasePresenceFrames;
+	UPROPERTY(config, EditAnywhere, Category = "Presence", meta = (ConsoleVariable = "r.ThinOutline.Presence.Frames", ClampMin = "1.0", UIMax = "16.0"))
+	float PresenceFrames;
 
-	/** Presence at and below which a crease is not drawn; the strength ramps up to Presence Draw Max. */
-	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.PresenceDrawMin", ClampMin = "0.0", ClampMax = "1.0"))
-	float CreasePresenceDrawMin;
+	/** Presence at and below which an edge is not drawn; the strength ramps up to Draw Max. */
+	UPROPERTY(config, EditAnywhere, Category = "Presence", meta = (ConsoleVariable = "r.ThinOutline.Presence.DrawMin", ClampMin = "0.0", ClampMax = "1.0"))
+	float PresenceDrawMin;
 
-	/** Presence at and above which a crease is drawn at its recorded strength (1: only a crease found on every recent frame; 0.6 before 2026-10-11). */
-	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.PresenceDrawMax", ClampMin = "0.0", ClampMax = "1.0"))
-	float CreasePresenceDrawMax;
+	/** Presence at and above which an edge is drawn at its recorded strength (1: only an edge found on every recent frame). */
+	UPROPERTY(config, EditAnywhere, Category = "Presence", meta = (ConsoleVariable = "r.ThinOutline.Presence.DrawMax", ClampMin = "0.0", ClampMax = "1.0"))
+	float PresenceDrawMax;
 
-	/** Presence below which a crease record is dropped. */
-	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.PresenceDropLevel", ClampMin = "0.0", ClampMax = "1.0"))
-	float CreasePresenceDropLevel;
+	/** Presence below which a record is dropped. */
+	UPROPERTY(config, EditAnywhere, Category = "Presence", meta = (ConsoleVariable = "r.ThinOutline.Presence.DropLevel", ClampMin = "0.0", ClampMax = "1.0"))
+	float PresenceDropLevel;
 
 	/**
-	 * Keep level at which a crease counts as found at a pixel for the presence, as a fraction of the ridge and valley thresholds. Below 1,
-	 * so that a crease that fires only on some frames (near the threshold) keeps its presence.
+	 * Keep level at which an edge counts as found at a pixel, as a fraction of the crease thresholds (creases) and of the silhouette
+	 * threshold (silhouettes, the depth step seen from either side). Below 1, so that an edge that fires only on some frames (near the
+	 * threshold) keeps its presence.
 	 */
-	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.HistoryCreaseTestThreshold", ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Crease Presence Keep Level"))
-	float CreaseHistoryCreaseTestThreshold;
+	UPROPERTY(config, EditAnywhere, Category = "Presence", meta = (ConsoleVariable = "r.ThinOutline.Presence.KeepLevel", ClampMin = "0.0", ClampMax = "1.0"))
+	float PresenceKeepLevel;
 
 	/**
-	 * The crease checks skip one-pixel spikes of the normal field: a pixel whose normal differs from both of its neighbours along an axis
-	 * while those two agree with each other (within Spike Threshold), or a neighbour that differs from the pixel while the pixel beyond it, on
-	 * the same surface, agrees with the pixel. Such spikes are groove walls thinner than a pixel, hit by the jittered sample on some frames,
-	 * which pop on a distant surface and fed crease records that blinked or stayed as dots. A real ridge one pixel wide is dropped with them.
-	 * Loads the normal of the pixel two steps away where a crease check fired. Separate shader permutations. Debug view 9's B shows the skipped checks.
+	 * The crease checks skip one-pixel spikes of the normal field (a pixel whose normal differs from both of its neighbours along an axis
+	 * while those two are one surface, or a neighbour that differs from the pixel while the pixel beyond it and the pixel are one surface),
+	 * and the silhouette checks skip one-pixel foregrounds (a pixel nearer than both of its neighbours along an axis while those two are one
+	 * surface). Such spikes are groove walls, wires and poles thinner than a pixel, hit by the jittered sample on some frames, which pop at
+	 * a distance and fed records that blinked or stayed as dots. A real ridge or sliver one pixel wide is dropped with them; a step is kept
+	 * by the plane test. Separate shader permutations. Debug view 9's B shows the skipped checks.
 	 */
-	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.SpikeFilter", DisplayName = "Crease Spike Filter"))
-	bool bCreaseSpikeFilter;
+	UPROPERTY(config, EditAnywhere, Category = "Spike Filter", meta = (ConsoleVariable = "r.ThinOutline.SpikeFilter", DisplayName = "Spike Filter"))
+	bool bSpikeFilter;
 
 	/** Two normals agree, for the spike filter, when the sine of the angle between them is below this: 0.125 is about 7 degrees, half the crease thresholds. */
-	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.SpikeThreshold", ClampMin = "0.0", ClampMax = "1.0"))
-	float CreaseSpikeThreshold;
+	UPROPERTY(config, EditAnywhere, Category = "Spike Filter", meta = (ConsoleVariable = "r.ThinOutline.SpikeThreshold", ClampMin = "0.0", ClampMax = "1.0"))
+	float SpikeThreshold;
 
 	/**
-	 * The two surfaces around a spike lie on one plane when the far one's sample is within this fraction of the depth of the near one's
+	 * The two surfaces around a spike lie on one plane when the second one's sample is within this fraction of the depth of the first one's
 	 * plane. A groove's two sides are one plane; a step's two risers are offset by the tread, which is not a spike. 0.003 = 3 cm at 10 m.
 	 */
-	UPROPERTY(config, EditAnywhere, Category = "Crease", meta = (ConsoleVariable = "r.ThinOutline.Crease.SpikePlaneTolerance", ClampMin = "0.0", UIMax = "0.05"))
-	float CreaseSpikePlaneTolerance;
-
+	UPROPERTY(config, EditAnywhere, Category = "Spike Filter", meta = (ConsoleVariable = "r.ThinOutline.SpikePlaneTolerance", ClampMin = "0.0", UIMax = "0.05"))
+	float SpikePlaneTolerance;
 
 	/**
 	 * Decay rate d of the edge records' running statistics. Samples are weighted by (1 - d)^age in frames, so a record that gets
@@ -217,14 +218,6 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Estimator", meta = (ConsoleVariable = "r.ThinOutline.Estimator.Decay", ClampMin = "0.001", ClampMax = "1.0", UIMax = "0.2"))
 	float EstimatorDecay;
-
-	/**
-	 * A record that fails a history test, or a crease record that meets a silhouette sample, is kept (and drawn as before) instead of being
-	 * dropped at once; after this many such frames in a row it is dropped, or the silhouette takes the axis over. 1 = dropped on the first one.
-	 * Where a pixel's jittered sample misses an edge on one frame of the jitter cycle, the outline then stays instead of disappearing.
-	 */
-	UPROPERTY(config, EditAnywhere, Category = "Estimator", meta = (ConsoleVariable = "r.ThinOutline.Estimator.FadeFrames", ClampMin = "1", UIMax = "8"))
-	int32 FadeFrames;
 
 	/**
 	 * When a pixel has both a horizontal- and a vertical-inducer edge, the one with the smaller slope standard error is drawn if the

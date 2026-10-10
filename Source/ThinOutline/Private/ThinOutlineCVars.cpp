@@ -54,7 +54,7 @@ TAutoConsoleVariable<int32> CVarThinOutlineDebugView(
 	TEXT("0 = composite the outline into scene color\n")
 	TEXT("1 = this frame's edge check strengths (R = silhouette, G = crease ridge, B = crease valley)\n")
 	TEXT("2 = crease records (R = horizontal-inducer sample count, G = vertical-inducer sample count, relative to a record\n")
-	TEXT("    that gets a sample every frame; B = co-trigger ratio)\n")
+	TEXT("    that gets a sample every frame; B = the larger presence)\n")
 	TEXT("3 = outline alpha of the reconstructed edge (R = horizontal-inducer edge, G = vertical-inducer edge,\n")
 	TEXT("    B = the edge is a silhouette)\n")
 	TEXT("4 = silhouette records, kept by the foreground pixels (R, G = sample counts as in 2; B = fraction of the samples\n")
@@ -66,8 +66,8 @@ TAutoConsoleVariable<int32> CVarThinOutlineDebugView(
 	TEXT("7 = the suppressions: R = outline alpha removed by r.ThinOutline.DenseEdgeSuppression, G = outline alpha drawn,\n")
 	TEXT("    B = outline alpha removed by r.ThinOutline.IsolatedEdgeSuppression\n")
 	TEXT("8 = (was the alpha stabilization, removed on 2026-10-11)\n")
-	TEXT("9 = r.ThinOutline.Crease.Presence: R, G = the presence of the horizontal and vertical crease records; B = a crease\n")
-	TEXT("    check of the pixel was skipped this frame as a normal spike (r.ThinOutline.Crease.SpikeFilter)\n")
+	TEXT("9 = r.ThinOutline.Presence: R, G = the presence of the horizontal and vertical records (either type); B = a check of\n")
+	TEXT("    the pixel was skipped this frame as a normal spike or a thin foreground (r.ThinOutline.SpikeFilter)\n")
 	TEXT("With r.ThinOutline.DrawAfterUpscaler 1 they are drawn at display resolution: 1, 2, 4 and 9 show the rendering pixel\n")
 	TEXT("under each display pixel (not blurred by the upscaler), 3, 5 and 7 the display pixel's alpha, and 5's R stays 0.\n"),
 	ECVF_Default
@@ -159,7 +159,8 @@ TAutoConsoleVariable<float> CVarThinOutlineSilhouetteCreaseTakeoverSampleCount(
 	TEXT("only when that record's decayed sample count is below this; otherwise the crease sample is ignored. This keeps the\n")
 	TEXT("record of a silhouette's edge pixel, whose sample alternates between a foreground with creases and the background.\n")
 	TEXT("Below 1, so that a silhouette that just got its first sample survives the next frame's crease sample.\n")
-	TEXT("A silhouette sample takes over a crease record after r.ThinOutline.Estimator.FadeFrames frames in a row.\n"),
+	TEXT("A silhouette sample takes over a crease record as the record's presence sinks (r.ThinOutline.Presence: a silhouette\n")
+	TEXT("sample is a frame on which the crease is not found), or at once on a moving pixel.\n"),
 	ECVF_Default
 );
 
@@ -201,94 +202,98 @@ TAutoConsoleVariable<float> CVarThinOutlineCreaseHistoryDepthThreshold(
 	ECVF_Default
 );
 
-TAutoConsoleVariable<int32> CVarThinOutlineCreasePresence(
-	TEXT("r.ThinOutline.Crease.Presence"),
+TAutoConsoleVariable<int32> CVarThinOutlinePresence(
+	TEXT("r.ThinOutline.Presence"),
 	1,
-	TEXT("1 = each crease record carries its presence, the fraction of recent frames with a crease found at its pixel along\n")
-	TEXT("its axis (the crease measure above the keep level of r.ThinOutline.Crease.HistoryCreaseTestThreshold), as an\n")
-	TEXT("exponential average over about r.ThinOutline.Crease.PresenceFrames frames. The drawn crease strength is scaled by a\n")
-	TEXT("ramp on it (0 at .PresenceDrawMin, 1 at .PresenceDrawMax) and the record is dropped below .PresenceDropLevel.\n")
-	TEXT("So a crease found on a few frames only (a groove wall thinner than a pixel, hit by the jittered sample now and\n")
-	TEXT("then: the pops of a distant surface) stays faint or invisible, a junction found every other frame draws steadily\n")
-	TEXT("at part strength, a new crease fades in over a few frames, and a record that passes every history test but no\n")
-	TEXT("longer describes a crease at its pixel (footprints, records slid along a surface, copies on a face widening on\n")
-	TEXT("screen) fades out and is dropped. It replaced the count of frames without a crease with a hard limit (2026-10-10).\n")
-	TEXT("0 = the depth test alone keeps crease records; strength as recorded. Separate shader permutations.\n"),
+	TEXT("1 = each edge record (crease or silhouette) carries its presence, the fraction of recent frames on which its edge\n")
+	TEXT("was found at its pixel along its axis (the crease or depth measure above the keep level of\n")
+	TEXT("r.ThinOutline.Presence.KeepLevel) and its history tests passed, as an exponential average over about\n")
+	TEXT("r.ThinOutline.Presence.Frames frames. The drawn strength is scaled by a ramp on it (0 at .DrawMin, 1 at .DrawMax)\n")
+	TEXT("and the record is dropped below .DropLevel. So an edge found on a few frames only (a groove wall or a wire thinner\n")
+	TEXT("than a pixel, hit by the jittered sample now and then: the pops of a distant surface) stays faint or invisible, a\n")
+	TEXT("junction found every other frame draws steadily at part strength, a new edge fades in over a few frames, a record\n")
+	TEXT("that fails its history tests (a moved surface, a contour that left) fades out, and one that passes them but no\n")
+	TEXT("longer describes an edge at its pixel (footprints, records slid along a surface, copies on a face widening on\n")
+	TEXT("screen) fades out and is dropped. It replaced the crease miss limit (2026-10-10) and the fade counts of both types\n")
+	TEXT("(bad frames in a row, dropped at a hard limit; 2026-10-11). The presence is always kept; 0 = it is not used: the\n")
+	TEXT("strength as recorded, records dropped only by their history tests on moving pixels and by sample decay.\n"),
 	ECVF_Default
 );
 
-TAutoConsoleVariable<float> CVarThinOutlineCreasePresenceFrames(
-	TEXT("r.ThinOutline.Crease.PresenceFrames"),
+TAutoConsoleVariable<float> CVarThinOutlinePresenceFrames(
+	TEXT("r.ThinOutline.Presence.Frames"),
 	4.0f,
-	TEXT("Memory of the presence average of r.ThinOutline.Crease.Presence, in frames (the presence moves by 1 / this toward\n")
-	TEXT("1 or 0 every frame). With 4: creases found on 1 frame in 4 or fewer stay below the draw ramp, a new crease fades in\n")
-	TEXT("over about 9 frames (to 90%, with the ramp ending at 1), a lost one fades out and is dropped after about 12. Larger\n")
-	TEXT("is steadier and slower.\n"),
+	TEXT("Memory of the presence average of r.ThinOutline.Presence, in frames (the presence moves by 1 / this toward 1 or 0\n")
+	TEXT("every frame). With 4: edges found on 1 frame in 4 or fewer stay below the draw ramp, a new edge fades in over about\n")
+	TEXT("9 frames (to 90%, with the ramp ending at 1), a lost one fades out and is dropped after about 12. Larger is\n")
+	TEXT("steadier and slower.\n"),
 	ECVF_Default
 );
 
-TAutoConsoleVariable<float> CVarThinOutlineCreasePresenceDrawMin(
-	TEXT("r.ThinOutline.Crease.PresenceDrawMin"),
+TAutoConsoleVariable<float> CVarThinOutlinePresenceDrawMin(
+	TEXT("r.ThinOutline.Presence.DrawMin"),
 	0.3f,
-	TEXT("Presence at and below which a crease is not drawn (r.ThinOutline.Crease.Presence); the strength ramps up to\n")
-	TEXT("r.ThinOutline.Crease.PresenceDrawMax.\n"),
+	TEXT("Presence at and below which an edge is not drawn (r.ThinOutline.Presence); the strength ramps up to\n")
+	TEXT("r.ThinOutline.Presence.DrawMax.\n"),
 	ECVF_Default
 );
 
-TAutoConsoleVariable<float> CVarThinOutlineCreasePresenceDrawMax(
-	TEXT("r.ThinOutline.Crease.PresenceDrawMax"),
+TAutoConsoleVariable<float> CVarThinOutlinePresenceDrawMax(
+	TEXT("r.ThinOutline.Presence.DrawMax"),
 	1.0f,
-	TEXT("Presence at and above which a crease is drawn at its recorded strength (r.ThinOutline.Crease.Presence). 1 (the\n")
-	TEXT("author's choice, 2026-10-11; 0.6 before): only a crease found on every recent frame draws at full strength, one found\n")
-	TEXT("on half of them at about 0.3, and a new crease fades in over about 9 frames (to 90%).\n"),
+	TEXT("Presence at and above which an edge is drawn at its recorded strength (r.ThinOutline.Presence). 1 (the author's\n")
+	TEXT("choice, 2026-10-11; 0.6 before): only an edge found on every recent frame draws at full strength, one found on half\n")
+	TEXT("of them at about 0.3, and a new edge fades in over about 9 frames (to 90%).\n"),
 	ECVF_Default
 );
 
-TAutoConsoleVariable<float> CVarThinOutlineCreasePresenceDropLevel(
-	TEXT("r.ThinOutline.Crease.PresenceDropLevel"),
+TAutoConsoleVariable<float> CVarThinOutlinePresenceDropLevel(
+	TEXT("r.ThinOutline.Presence.DropLevel"),
 	0.05f,
-	TEXT("Presence below which a crease record is dropped (r.ThinOutline.Crease.Presence).\n"),
+	TEXT("Presence below which a record is dropped (r.ThinOutline.Presence).\n"),
 	ECVF_Default
 );
 
-TAutoConsoleVariable<int32> CVarThinOutlineCreaseSpikeFilter(
-	TEXT("r.ThinOutline.Crease.SpikeFilter"),
+TAutoConsoleVariable<float> CVarThinOutlinePresenceKeepLevel(
+	TEXT("r.ThinOutline.Presence.KeepLevel"),
+	0.5f,
+	TEXT("Keep level at which an edge counts as found at a pixel for r.ThinOutline.Presence, as a fraction of\n")
+	TEXT("r.ThinOutline.Crease.RidgeThreshold and ValleyThreshold (creases) and of r.ThinOutline.Silhouette.Threshold\n")
+	TEXT("(silhouettes, the depth step seen from either side). Below 1, so that an edge that fires only on some frames (near\n")
+	TEXT("the threshold) keeps its presence.\n"),
+	ECVF_Default
+);
+
+TAutoConsoleVariable<int32> CVarThinOutlineSpikeFilter(
+	TEXT("r.ThinOutline.SpikeFilter"),
 	1,
-	TEXT("1 = the crease checks skip one-pixel spikes of the normal field: a pixel whose normal differs from both of its\n")
-	TEXT("neighbours along an axis while those two are one surface (normals agreeing within r.ThinOutline.Crease.SpikeThreshold\n")
-	TEXT("and lying on one plane within .SpikePlaneTolerance), or a neighbour that differs from the pixel while the pixel beyond\n")
-	TEXT("it and the pixel are one surface. Such spikes are groove walls thinner than a pixel, hit by the jittered sample on\n")
-	TEXT("some frames, which pop on a distant surface and fed crease records that blinked or stayed as dots. A real ridge one\n")
-	TEXT("pixel wide on a flat surface is dropped with them; a step (a thin top between two risers) is kept by the plane test.\n")
-	TEXT("Loads the normal of the pixel two steps away where a crease check fired (a few percent of the pixels). Debug view 9's B\n")
-	TEXT("shows the skipped checks.\n")
+	TEXT("1 = the crease checks skip one-pixel spikes of the normal field (a pixel whose normal differs from both of its\n")
+	TEXT("neighbours along an axis while those two are one surface, or a neighbour that differs from the pixel while the pixel\n")
+	TEXT("beyond it and the pixel are one surface), and the silhouette checks skip one-pixel foregrounds (a pixel nearer than\n")
+	TEXT("both of its neighbours along an axis while those two are one surface). One surface: normals agreeing within\n")
+	TEXT("r.ThinOutline.SpikeThreshold and lying on one plane within .SpikePlaneTolerance. Such spikes are groove walls, wires\n")
+	TEXT("and poles thinner than a pixel, hit by the jittered sample on some frames, which pop at a distance and fed records\n")
+	TEXT("that blinked or stayed as dots. A real ridge or a real sliver one pixel wide is dropped with them; a step is kept\n")
+	TEXT("by the plane test. Loads the normal of the pixel two steps away where a crease check fired (a few percent of the\n")
+	TEXT("pixels). Debug view 9's B shows the skipped checks.\n")
 	TEXT("0 = off. Separate shader permutations of the record pass.\n"),
 	ECVF_Default
 );
 
-TAutoConsoleVariable<float> CVarThinOutlineCreaseSpikeThreshold(
-	TEXT("r.ThinOutline.Crease.SpikeThreshold"),
+TAutoConsoleVariable<float> CVarThinOutlineSpikeThreshold(
+	TEXT("r.ThinOutline.SpikeThreshold"),
 	0.125f,
-	TEXT("Two normals agree, for r.ThinOutline.Crease.SpikeFilter, when the sine of the angle between them (|cross|) is below\n")
-	TEXT("this: 0.125 is about 7 degrees, half the crease thresholds.\n"),
+	TEXT("Two normals agree, for r.ThinOutline.SpikeFilter, when the sine of the angle between them (|cross|) is below this:\n")
+	TEXT("0.125 is about 7 degrees, half the crease thresholds.\n"),
 	ECVF_Default
 );
 
-TAutoConsoleVariable<float> CVarThinOutlineCreaseSpikePlaneTolerance(
-	TEXT("r.ThinOutline.Crease.SpikePlaneTolerance"),
+TAutoConsoleVariable<float> CVarThinOutlineSpikePlaneTolerance(
+	TEXT("r.ThinOutline.SpikePlaneTolerance"),
 	0.003f,
-	TEXT("The two surfaces around a spike, for r.ThinOutline.Crease.SpikeFilter, lie on one plane when the far one's sample is\n")
-	TEXT("within this fraction of the depth of the near one's plane (along its normal). A groove's two sides are one plane; a\n")
+	TEXT("The two surfaces around a spike, for r.ThinOutline.SpikeFilter, lie on one plane when the second one's sample is\n")
+	TEXT("within this fraction of the depth of the first one's plane (along its normal). A groove's two sides are one plane; a\n")
 	TEXT("step's two risers are offset by the tread, which is not a spike. 0.003 = 3 cm at 10 m.\n"),
-	ECVF_Default
-);
-
-TAutoConsoleVariable<float> CVarThinOutlineCreaseHistoryCreaseTestThreshold(
-	TEXT("r.ThinOutline.Crease.HistoryCreaseTestThreshold"),
-	0.5f,
-	TEXT("Keep level at which a crease counts as found at a pixel for r.ThinOutline.Crease.Presence, as a fraction of\n")
-	TEXT("r.ThinOutline.Crease.RidgeThreshold and ValleyThreshold. Below 1, so that a crease that fires only on some frames\n")
-	TEXT("(near the threshold) keeps its presence.\n"),
 	ECVF_Default
 );
 
@@ -378,22 +383,11 @@ TAutoConsoleVariable<float> CVarThinOutlineEstimatorDecay(
 	ECVF_Default
 );
 
-TAutoConsoleVariable<int32> CVarThinOutlineEstimatorFadeFrames(
-	TEXT("r.ThinOutline.Estimator.FadeFrames"),
-	3,
-	TEXT("A record that fails a history test (crease depth test; silhouette depth or background test), or a crease record\n")
-	TEXT("that meets a silhouette sample, is kept (and drawn as before) instead of being dropped at once; after this many such\n")
-	TEXT("frames in a row it is dropped, or the silhouette takes the axis over. 1 = dropped on the first one.\n")
-	TEXT("Where a pixel's jittered sample misses an edge, or lands on the other surface of a depth step, on one frame of the\n")
-	TEXT("jitter cycle, the outline then stays instead of disappearing until the record is rebuilt.\n"),
-	ECVF_Default
-);
-
 TAutoConsoleVariable<float> CVarThinOutlineEstimatorFadeMaxSpeed(
 	TEXT("r.ThinOutline.Estimator.FadeMaxSpeed"),
 	0.05f,
-	TEXT("Testing: only a pixel moving slower than this (viewport pixels per frame) keeps records through bad frames (see\n")
-	TEXT("r.ThinOutline.Estimator.FadeFrames); on faster ones a record that fails a history test is dropped at once and a\n")
+	TEXT("Testing: only a pixel moving slower than this (viewport pixels per frame) keeps records through bad frames (their\n")
+	TEXT("presence sinks, r.ThinOutline.Presence); on faster ones a record that fails a history test is dropped at once and a\n")
 	TEXT("silhouette sample takes a crease record over at once, so that records do not trail moving edges and contours that\n")
 	TEXT("move in are not held back. A large value keeps them at any speed.\n"),
 	ECVF_Default

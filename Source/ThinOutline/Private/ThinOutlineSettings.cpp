@@ -31,15 +31,15 @@ UThinOutlineSettings::UThinOutlineSettings(const FObjectInitializer& ObjectIniti
 	CreaseScale = 4.0f;
 	CreaseThickness = 1.0f;
 	CreaseHistoryDepthThreshold = 0.05f;
-	bCreasePresence = true;
-	CreasePresenceFrames = 4.0f;
-	CreasePresenceDrawMin = 0.3f;
-	CreasePresenceDrawMax = 1.0f;
-	CreasePresenceDropLevel = 0.05f;
-	CreaseHistoryCreaseTestThreshold = 0.5f;
-	bCreaseSpikeFilter = true;
-	CreaseSpikeThreshold = 0.125f;
-	CreaseSpikePlaneTolerance = 0.003f;
+	bPresence = true;
+	PresenceFrames = 4.0f;
+	PresenceDrawMin = 0.3f;
+	PresenceDrawMax = 1.0f;
+	PresenceDropLevel = 0.05f;
+	PresenceKeepLevel = 0.5f;
+	bSpikeFilter = true;
+	SpikeThreshold = 0.125f;
+	SpikePlaneTolerance = 0.003f;
 	bSpatialFilter = true;
 	SpatialFilterSigma = 0.25f;
 	bAxisBlend = false;
@@ -48,7 +48,6 @@ UThinOutlineSettings::UThinOutlineSettings(const FObjectInitializer& ObjectIniti
 	DenseEdgeTolerance = 2.0f;
 	bIsolatedEdgeSuppression = true;
 	EstimatorDecay = 0.04f;
-	FadeFrames = 3;
 	SlopeStandardErrorThreshold = 0.05f;
 	HistoryReprojection = 3;
 }
